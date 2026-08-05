@@ -1,0 +1,19 @@
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+
+# Backend
+backend/**/bin/
+backend/**/obj/
+backend/**/App_Data/
+backend/src/CertMaster.Api/appsettings.Development.json
+
+# IDE
+.vs/
+.vscode/
+.idea/
+
+# User secrets
+*.user
+*.suo

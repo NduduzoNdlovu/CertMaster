@@ -1,0 +1,7 @@
+bin/
+obj/
+*.user
+.vs/
+appsettings.Production.json
+*.db
+src/CertMaster.Api/App_Data/
