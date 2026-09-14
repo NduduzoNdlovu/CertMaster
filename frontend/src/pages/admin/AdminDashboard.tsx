@@ -4,8 +4,28 @@ import { Card, SectionHeading, StatCard, Badge } from "../../components/ui/Primi
 import { RegistrationsChart } from "../../components/charts/RegistrationsChart";
 
 export default function AdminDashboard() {
-  const { data, isLoading } = useAdminOverview();
-  if (isLoading || !data) return <p className="text-sm text-text-secondary">Loading overview...</p>;
+  const { data, isLoading, isError, refetch } = useAdminOverview();
+
+  if (isLoading) return <p className="text-sm text-text-secondary">Loading overview...</p>;
+
+  if (isError || !data) {
+    return (
+      <Card className="p-6">
+        <SectionHeading title="Dashboard unavailable" description="The latest platform statistics could not be loaded." />
+        <button
+          type="button"
+          onClick={() => refetch()}
+          className="text-sm font-semibold text-brand-primary hover:underline"
+        >
+          Try again
+        </button>
+      </Card>
+    );
+  }
+
+  const growthPrefix = data.monthlyGrowthPercent > 0 ? "+" : "";
+  const statusTone = (status: string): "success" | "warning" =>
+    status === "Online" || status === "Running" ? "success" : "warning";
 
   return (
     <div className="space-y-6">
@@ -15,7 +35,7 @@ export default function AdminDashboard() {
         <StatCard label="Total users" value={data.totalUsers.toLocaleString()} icon={<Users size={20} />} />
         <StatCard label="Premium users" value={data.premiumUsers.toLocaleString()} icon={<Crown size={20} />} />
         <StatCard label="Users online now" value={data.usersOnlineNow} icon={<Activity size={20} />} />
-        <StatCard label="Monthly revenue" value={`R${data.monthlyRevenue.toLocaleString()}`} sublabel={`+${data.monthlyGrowthPercent}% MoM`} icon={<DollarSign size={20} />} />
+        <StatCard label="Monthly revenue" value={`R${data.monthlyRevenue.toLocaleString()}`} sublabel={`${growthPrefix}${data.monthlyGrowthPercent}% vs previous 30 days`} icon={<DollarSign size={20} />} />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -42,15 +62,15 @@ export default function AdminDashboard() {
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <div className="flex items-center justify-between p-4 rounded-md bg-bg-alt">
             <span className="text-sm text-text-primary">Database</span>
-            <Badge tone="success">{data?.systemStatus?.database ?? "Unknown"}</Badge>
+            <Badge tone={statusTone(data.systemStatus.database)}>{data.systemStatus.database}</Badge>
           </div>
           <div className="flex items-center justify-between p-4 rounded-md bg-bg-alt">
             <span className="text-sm text-text-primary">API</span>
-            <Badge tone="success">{data?.systemStatus?.api ?? "Unknown"}</Badge>
+            <Badge tone={statusTone(data.systemStatus.api)}>{data.systemStatus.api}</Badge>
           </div>
           <div className="flex items-center justify-between p-4 rounded-md bg-bg-alt">
             <span className="text-sm text-text-primary">Background jobs</span>
-            <Badge tone="info">{data?.systemStatus?.backgroundJobs ?? "Unknown"}</Badge>
+            <Badge tone={statusTone(data.systemStatus.backgroundJobs)}>{data.systemStatus.backgroundJobs}</Badge>
           </div>
         </div>
       </Card>
