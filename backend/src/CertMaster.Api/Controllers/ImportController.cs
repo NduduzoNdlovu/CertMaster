@@ -25,12 +25,13 @@ public class ImportController : ControllerBase
     }
 
     [HttpPost("imports")]
+    [Consumes("multipart/form-data")]
     [RequestSizeLimit(MaxFileSizeBytes)]
     public async Task<ActionResult<ImportJobDto>> StartImport(
         [FromForm] Guid certificationId,
         [FromForm] Guid? questionBankVersionId,
         [FromForm] string? newVersionLabel,
-        [FromForm] IFormFile file,
+        IFormFile file,
         CancellationToken ct)
     {
         if (file is null || file.Length == 0)
