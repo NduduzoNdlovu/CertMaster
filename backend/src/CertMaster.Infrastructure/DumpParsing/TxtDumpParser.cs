@@ -28,7 +28,7 @@ public class TxtDumpParser : IDumpParser
 {
     public IReadOnlyCollection<string> SupportedExtensions => new[] { ".txt" };
 
-    private static readonly Regex OptionLine = new(@"^([A-Fa-f])\)\s*(.+)$", RegexOptions.Compiled);
+    private static readonly Regex OptionLine = new(@"^(?:[•●▪◦]\s*)?([A-Fa-f])[\)\.:]\s*(.+)$", RegexOptions.Compiled);
 
     public async Task<List<ParsedQuestion>> ParseAsync(Stream fileStream, CancellationToken ct)
     {
@@ -50,7 +50,7 @@ public class TxtDumpParser : IDumpParser
         {
             var pq = new ParsedQuestion();
             var optionTexts = new SortedDictionary<char, string>();
-            string? answerLetter = null;
+            string? answerLetters = null;
 
             foreach (var rawLine in block.Split('\n'))
             {
@@ -73,7 +73,7 @@ public class TxtDumpParser : IDumpParser
                     case "q":
                     case "question": pq.Prompt = value; break;
                     case "answer":
-                    case "correct": answerLetter = value?.Trim().ToUpperInvariant(); break;
+                    case "correct": answerLetters = value?.Trim().ToUpperInvariant(); break;
                     case "explanation": pq.Explanation = value; break;
                     case "reference": pq.Reference = value; break;
                 }
@@ -82,11 +82,14 @@ public class TxtDumpParser : IDumpParser
             foreach (var kvp in optionTexts.OrderBy(o => o.Key))
                 pq.Options.Add(kvp.Value);
 
-            if (!string.IsNullOrEmpty(answerLetter) && answerLetter.Length == 1)
+            if (!string.IsNullOrEmpty(answerLetters))
             {
-                var index = answerLetter[0] - 'A';
-                if (index >= 0 && index < pq.Options.Count)
-                    pq.CorrectOptionIndex = index;
+                foreach (var letter in Regex.Matches(answerLetters, @"\b[A-F]\b").Cast<Match>().Select(m => m.Value[0]).Distinct())
+                {
+                    var index = letter - 'A';
+                    if (index >= 0 && index < pq.Options.Count)
+                        pq.CorrectOptionIndexes.Add(index);
+                }
             }
 
             if (!string.IsNullOrWhiteSpace(pq.Prompt))

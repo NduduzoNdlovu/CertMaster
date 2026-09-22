@@ -44,11 +44,8 @@ public class ImportJob : BaseEntity
 
 /// <summary>
 /// An image extracted from an uploaded file (currently PDF only). Stored and made
-/// available to the admin during review, but — since reliably matching an image to
-/// the specific question it belongs to requires real page-layout analysis, which
-/// this release does not attempt — images are associated with the import job and a
-/// page number only, not with an individual ImportedQuestion. An admin can view them
-/// alongside the review queue and manually attach one to a question if needed.
+/// available to the admin during review. Page ranges detected by the PDF parser are
+/// used to associate each useful, non-repeated image with its imported question.
 /// </summary>
 public class ImportJobImage : BaseEntity
 {
@@ -56,6 +53,10 @@ public class ImportJobImage : BaseEntity
     public ImportJob? ImportJob { get; set; }
     public string StoredFilePath { get; set; } = string.Empty;
     public int PageNumber { get; set; }
+    public Guid? ImportedQuestionId { get; set; }
+    public ImportedQuestion? ImportedQuestion { get; set; }
+    public string ImageKind { get; set; } = "Question";
+    public int SortOrder { get; set; }
 }
 
 /// <summary>
@@ -80,6 +81,10 @@ public class ImportedQuestion : BaseEntity
     public string Prompt { get; set; } = string.Empty;
     public string Explanation { get; set; } = string.Empty;
     public string? Reference { get; set; }
+    public string QuestionType { get; set; } = "Choice";
+    public bool RequiresManualReview { get; set; }
+    public int? SourcePageStart { get; set; }
+    public int? SourcePageEnd { get; set; }
 
     public ImportedQuestionReviewStatus ReviewStatus { get; set; } = ImportedQuestionReviewStatus.PendingReview;
 
@@ -100,6 +105,7 @@ public class ImportedQuestion : BaseEntity
     public Guid? PublishedQuestionId { get; set; }
 
     public ICollection<ImportedQuestionOption> Options { get; set; } = new List<ImportedQuestionOption>();
+    public ICollection<ImportJobImage> Images { get; set; } = new List<ImportJobImage>();
 }
 
 public class ImportedQuestionOption : BaseEntity

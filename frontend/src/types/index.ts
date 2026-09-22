@@ -232,17 +232,24 @@ export interface ImportedQuestion {
   prompt: string;
   explanation: string;
   reference?: string;
+  questionType: "Choice" | "MultipleResponse" | "Simulation" | string;
+  requiresManualReview: boolean;
+  sourcePageStart?: number;
+  sourcePageEnd?: number;
   reviewStatus: ImportedQuestionReviewStatus;
   validationIssues: string;
   isDuplicate: boolean;
   duplicateOfQuestionId?: string;
   publishedQuestionId?: string;
   options: ImportedQuestionOption[];
+  images: ImportJobImageInfo[];
 }
 
 export interface ImportJobImageInfo {
   id: string;
   pageNumber: number;
+  imageKind: string;
+  importedQuestionId?: string;
 }
 
 export interface ImportJobDetail {

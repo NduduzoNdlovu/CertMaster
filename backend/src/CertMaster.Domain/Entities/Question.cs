@@ -18,6 +18,8 @@ public class Question : BaseEntity
     public string Explanation { get; set; } = string.Empty;
     public string? Reference { get; set; }
     public string? ImageUrl { get; set; }
+    public string QuestionType { get; set; } = "Choice";
+    public string? InteractionJson { get; set; }
 
     public QuestionStatus Status { get; set; } = QuestionStatus.Draft;
 
@@ -31,6 +33,7 @@ public class QuestionOption : BaseEntity
     public string Text { get; set; } = string.Empty;
     public bool IsCorrect { get; set; }
     public int SortOrder { get; set; }
+    public string? ImageUrl { get; set; }
 }
 
 public class QuestionReport : BaseEntity

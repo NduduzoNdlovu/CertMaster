@@ -1,0 +1,1106 @@
+diff --git a/PDF-IMPORT-PATCH-INSTRUCTIONS.md b/PDF-IMPORT-PATCH-INSTRUCTIONS.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..92ac1eb752a35138ad73db14aef79047a17a351f
+--- /dev/null
++++ b/PDF-IMPORT-PATCH-INSTRUCTIONS.md
+@@ -0,0 +1,48 @@
++# CertMaster PDF import patch
++
++This patch upgrades the existing import workflow without replacing existing data.
++
++## Included
++
++- A+ headings such as `Question #:109`
++- Network+ headings such as `Question: 7`
++- `A.`, `A)`, `A:` and bulleted option formats
++- answers on the same or following line
++- multiple correct answers such as `Answer: D E`
++- PDF source-page tracking
++- PDF image extraction, duplicate decoration filtering and question association
++- PBQ/simulation detection and a mandatory manual-review gate
++- authenticated image previews in the admin review screen
++- EF Core schema migration
++
++Static PDFs do not contain the original behaviour of interactive PBQs. The patch
++preserves their text and images and blocks approval until an administrator reviews
++or converts them. It does not pretend to recreate unavailable CompTIA scoring rules.
++
++## Apply
++
++From the CertMaster repository root:
++
++```powershell
++git apply --check .\certmaster-pdf-image-pbq-import.patch
++git apply .\certmaster-pdf-image-pbq-import.patch
++```
++
++Then apply the included migration and build:
++
++```powershell
++cd backend
++dotnet restore .\CertMaster.sln
++dotnet build .\CertMaster.sln
++
++dotnet ef database update `
++  --project .\src\CertMaster.Infrastructure\CertMaster.Infrastructure.csproj `
++  --startup-project .\src\CertMaster.Api\CertMaster.Api.csproj
++
++cd ..\frontend
++npm install
++npm run build
++```
++
++Delete the old zero-question import versions or leave them unpublished. Upload the
++PDF again into a new question-bank version, then inspect flagged PBQs before publish.
+diff --git a/backend/src/CertMaster.Api/Controllers/QuestionsController.cs b/backend/src/CertMaster.Api/Controllers/QuestionsController.cs
+index 5e8414e1e237edcd99f9d9efc0ac1a73de8d109f..dfa4c6de73c7984bb0a1b37e4b8282f71f98cfd4 100644
+--- a/backend/src/CertMaster.Api/Controllers/QuestionsController.cs
++++ b/backend/src/CertMaster.Api/Controllers/QuestionsController.cs
+@@ -1,4 +1,5 @@
+ using CertMaster.Application.Features.Questions;
++using CertMaster.Application.Features.Import;
+ using CertMaster.Domain.Enums;
+ using Microsoft.AspNetCore.Authorization;
+ using Microsoft.AspNetCore.Mvc;
+@@ -11,10 +12,12 @@ namespace CertMaster.Api.Controllers;
+ public class QuestionsController : ControllerBase
+ {
+     private readonly QuestionService _questionService;
++    private readonly ImportService _importService;
+ 
+-    public QuestionsController(QuestionService questionService)
++    public QuestionsController(QuestionService questionService, ImportService importService)
+     {
+         _questionService = questionService;
++        _importService = importService;
+     }
+ 
+     [HttpGet("practice")]
+@@ -28,4 +31,11 @@ public class QuestionsController : ControllerBase
+         var questions = await _questionService.GetPracticeQuestionsAsync(certificationId, topic, difficulty, take, ct);
+         return Ok(questions);
+     }
++
++    [HttpGet("{id:guid}/image")]
++    public async Task<ActionResult> GetQuestionImage(Guid id, CancellationToken ct)
++    {
++        var stream = await _importService.OpenPublishedQuestionImageAsync(id, ct);
++        return File(stream, "image/png");
++    }
+ }
+diff --git a/backend/src/CertMaster.Application/Features/DumpUpload/DumpUploadModels.cs b/backend/src/CertMaster.Application/Features/DumpUpload/DumpUploadModels.cs
+index da33fef574c6240207ac7b131f69095a009d6699..53d536afdfe224752c9293ca6ff218362d7d007c 100644
+--- a/backend/src/CertMaster.Application/Features/DumpUpload/DumpUploadModels.cs
++++ b/backend/src/CertMaster.Application/Features/DumpUpload/DumpUploadModels.cs
+@@ -14,17 +14,32 @@ public class ParsedQuestion
+     public string? DifficultyRaw { get; set; }
+     public string? Prompt { get; set; }
+     public List<string> Options { get; set; } = new();
+-    public int CorrectOptionIndex { get; set; } = -1; // 0-based
++    // Multiple-response questions ("Select two", "Choose all") are common in
++    // CompTIA material, so parsers must not collapse the answer to one option.
++    public List<int> CorrectOptionIndexes { get; set; } = new(); // 0-based
++    public int CorrectOptionIndex
++    {
++        get => CorrectOptionIndexes.FirstOrDefault(-1);
++        set
++        {
++            CorrectOptionIndexes.Clear();
++            if (value >= 0) CorrectOptionIndexes.Add(value);
++        }
++    }
+     public string? Explanation { get; set; }
+     public string? Reference { get; set; }
++    public int? SourcePageStart { get; set; }
++    public int? SourcePageEnd { get; set; }
++    public string QuestionType { get; set; } = "Choice";
++    public bool RequiresManualReview { get; set; }
+ 
+     public List<string> ValidationErrors { get; } = new();
+ 
+     public bool IsValid =>
+         !string.IsNullOrWhiteSpace(Prompt) &&
+         Options.Count(o => !string.IsNullOrWhiteSpace(o)) >= 2 &&
+-        CorrectOptionIndex >= 0 &&
+-        CorrectOptionIndex < Options.Count;
++        CorrectOptionIndexes.Count > 0 &&
++        CorrectOptionIndexes.All(i => i >= 0 && i < Options.Count);
+ 
+     public Difficulty ResolveDifficulty()
+     {
+diff --git a/backend/src/CertMaster.Application/Features/Import/ImportModels.cs b/backend/src/CertMaster.Application/Features/Import/ImportModels.cs
+index 22abd8bdc4a1940ddb77588b1e5f13fe40806852..4fae72e73975aa585448c0a21540546a273d417c 100644
+--- a/backend/src/CertMaster.Application/Features/Import/ImportModels.cs
++++ b/backend/src/CertMaster.Application/Features/Import/ImportModels.cs
+@@ -40,14 +40,19 @@ public record ImportedQuestionDto(
+     string Prompt,
+     string Explanation,
+     string? Reference,
++    string QuestionType,
++    bool RequiresManualReview,
++    int? SourcePageStart,
++    int? SourcePageEnd,
+     string ReviewStatus,
+     string ValidationIssues,
+     bool IsDuplicate,
+     Guid? DuplicateOfQuestionId,
+     Guid? PublishedQuestionId,
+-    List<ImportedQuestionOptionDto> Options);
++    List<ImportedQuestionOptionDto> Options,
++    List<ImportJobImageDto> Images);
+ 
+-public record ImportJobImageDto(Guid Id, int PageNumber);
++public record ImportJobImageDto(Guid Id, int PageNumber, string ImageKind, Guid? ImportedQuestionId);
+ 
+ public record ImportJobDetailDto(ImportJobDto Job, List<ImportedQuestionDto> Questions, List<ImportJobImageDto> ExtractedImages);
+ 
+@@ -60,6 +65,8 @@ public record UpdateImportedQuestionRequest(
+     string Prompt,
+     string Explanation,
+     string? Reference,
++    string QuestionType,
++    bool RequiresManualReview,
+     List<UpdateImportedQuestionOptionRequest> Options);
+ 
+ public record ApproveQuestionsRequest(List<Guid> ImportedQuestionIds);
+diff --git a/backend/src/CertMaster.Application/Features/Import/ImportService.cs b/backend/src/CertMaster.Application/Features/Import/ImportService.cs
+index 3e84390dda754bb47310842d1a46facfea6d1274..be52773eaa0032074d833eb4895258644fe55653 100644
+--- a/backend/src/CertMaster.Application/Features/Import/ImportService.cs
++++ b/backend/src/CertMaster.Application/Features/Import/ImportService.cs
+@@ -190,12 +190,6 @@ public class ImportService
+         buffer.Position = 0;
+         var parsedQuestions = await parser.ParseAsync(buffer, ct);
+ 
+-        if (sourceFormat == DumpSourceFormat.Pdf)
+-        {
+-            buffer.Position = 0;
+-            await ExtractPdfImagesAsync(job, buffer, ct);
+-        }
+-
+         // ---- Detect question boundaries / options / correct answers / explanations ----
+         // (all handled inside the parser — ParsedQuestion already reflects this)
+         job.Status = ImportJobStatus.DetectingQuestions;
+@@ -244,8 +238,10 @@ public class ImportService
+             if (string.IsNullOrWhiteSpace(pq.Prompt)) issues.Add("No question text found.");
+             var nonEmptyOptions = pq.Options.Count(o => !string.IsNullOrWhiteSpace(o));
+             if (nonEmptyOptions < 2) issues.Add($"Only {nonEmptyOptions} answer option(s) found (need at least 2).");
+-            if (pq.CorrectOptionIndex < 0 || pq.CorrectOptionIndex >= pq.Options.Count)
++            if (pq.CorrectOptionIndexes.Count == 0 || pq.CorrectOptionIndexes.Any(i => i < 0 || i >= pq.Options.Count))
+                 issues.Add("No correct answer could be identified.");
++            if (pq.RequiresManualReview)
++                issues.Add("Interactive PBQ/simulation detected. Configure and verify it manually before approval.");
+             if (pq.Options.Select(o => o.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).Count() < pq.Options.Count)
+                 issues.Add("Two or more answer options are identical.");
+ 
+@@ -284,6 +280,10 @@ public class ImportService
+                 Prompt = normalizedPrompt,
+                 Explanation = pq.Explanation ?? string.Empty,
+                 Reference = pq.Reference,
++                QuestionType = pq.QuestionType,
++                RequiresManualReview = pq.RequiresManualReview,
++                SourcePageStart = pq.SourcePageStart,
++                SourcePageEnd = pq.SourcePageEnd,
+                 ReviewStatus = ImportedQuestionReviewStatus.PendingReview,
+                 ValidationIssues = string.Join(" ", issues),
+                 IsDuplicate = isDuplicate,
+@@ -295,7 +295,7 @@ public class ImportService
+                 importedQuestion.Options.Add(new ImportedQuestionOption
+                 {
+                     Text = pq.Options[i],
+-                    IsCorrect = i == pq.CorrectOptionIndex,
++                    IsCorrect = pq.CorrectOptionIndexes.Contains(i),
+                     SortOrder = i + 1,
+                 });
+             }
+@@ -303,6 +303,15 @@ public class ImportService
+             _db.ImportedQuestions.Add(importedQuestion);
+         }
+ 
++        // Persist questions first so extracted PDF images can be associated by
++        // their page number instead of being left as an unstructured gallery.
++        await _db.SaveChangesAsync(ct);
++        if (sourceFormat == DumpSourceFormat.Pdf)
++        {
++            buffer.Position = 0;
++            await ExtractPdfImagesAsync(job, buffer, ct);
++        }
++
+         // ---- Ready for administrator review ----
+         job.Status = ImportJobStatus.ReadyForReview;
+         job.QuestionsExtracted = parsedQuestions.Count;
+@@ -336,23 +345,39 @@ public class ImportService
+         try
+         {
+             using var document = UglyToad.PdfPig.PdfDocument.Open(buffer);
++            var imported = await _db.ImportedQuestions
++                .Where(q => q.ImportJobId == job.Id)
++                .ToListAsync(ct);
++            var seenImageHashes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+             var pageNumber = 0;
+             foreach (var page in document.GetPages())
+             {
+                 pageNumber++;
++                var sortOrder = 0;
+                 foreach (var image in page.GetImages())
+                 {
+                     ct.ThrowIfCancellationRequested();
++                    // Tiny/repeated page decorations are not useful question media.
++                    if (image.Bounds.Width < 40 || image.Bounds.Height < 30) continue;
+                     if (!image.TryGetPng(out var pngBytes)) continue;
++                    var imageHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(pngBytes));
++                    if (!seenImageHashes.Add(imageHash)) continue; // repeated logo/banner/page decoration
+ 
+                     using var imageStream = new MemoryStream(pngBytes);
+                     var stored = await _fileStorage.SaveAsync(imageStream, $"page-{pageNumber}.png", ct);
+ 
++                    var linkedQuestion = imported.FirstOrDefault(q =>
++                        q.SourcePageStart is not null && q.SourcePageEnd is not null &&
++                        pageNumber >= q.SourcePageStart && pageNumber <= q.SourcePageEnd);
++
+                     _db.ImportJobImages.Add(new ImportJobImage
+                     {
+                         ImportJobId = job.Id,
+                         StoredFilePath = stored.StoragePath,
+                         PageNumber = pageNumber,
++                        ImportedQuestionId = linkedQuestion?.Id,
++                        ImageKind = linkedQuestion?.QuestionType == "Simulation" ? "Simulation" : "Question",
++                        SortOrder = ++sortOrder,
+                     });
+                 }
+             }
+@@ -387,6 +412,7 @@ public class ImportService
+ 
+         var questions = await _db.ImportedQuestions
+             .Include(q => q.Options)
++            .Include(q => q.Images)
+             .Where(q => q.ImportJobId == jobId)
+             .OrderBy(q => q.CreatedAtUtc)
+             .ToListAsync(ct);
+@@ -394,13 +420,14 @@ public class ImportService
+         return new ImportJobDetailDto(
+             ToJobDto(job),
+             questions.Select(ToQuestionDto).ToList(),
+-            job.ExtractedImages.Select(i => new ImportJobImageDto(i.Id, i.PageNumber)).ToList());
++            job.ExtractedImages.Select(i => new ImportJobImageDto(i.Id, i.PageNumber, i.ImageKind, i.ImportedQuestionId)).ToList());
+     }
+ 
+     public async Task<ImportedQuestionDto> UpdateImportedQuestionAsync(Guid id, UpdateImportedQuestionRequest request, CancellationToken ct)
+     {
+         var question = await _db.ImportedQuestions
+             .Include(q => q.Options)
++            .Include(q => q.Images)
+             .FirstOrDefaultAsync(q => q.Id == id, ct)
+             ?? throw new InvalidOperationException("Imported question not found.");
+ 
+@@ -418,6 +445,8 @@ public class ImportService
+         question.Prompt = TextNormalizer.NormalizeText(request.Prompt);
+         question.Explanation = TextNormalizer.NormalizeText(request.Explanation);
+         question.Reference = string.IsNullOrWhiteSpace(request.Reference) ? null : TextNormalizer.NormalizeText(request.Reference);
++        question.QuestionType = string.IsNullOrWhiteSpace(request.QuestionType) ? "Choice" : request.QuestionType.Trim();
++        question.RequiresManualReview = request.RequiresManualReview;
+ 
+         // Replace options wholesale — simplest correct approach for admin corrections.
+         _db.ImportedQuestionOptions.RemoveRange(question.Options);
+@@ -467,6 +496,9 @@ public class ImportService
+             if (string.IsNullOrWhiteSpace(q.Prompt) || !hasEnoughOptions || !hasCorrectAnswer)
+                 throw new InvalidOperationException(
+                     $"Can't approve a question with missing text, fewer than 2 options, or no correct answer marked (question: \"{Truncate(q.Prompt, 50)}\").");
++            if (q.RequiresManualReview)
++                throw new InvalidOperationException(
++                    $"Can't approve an interactive PBQ until an administrator clears its manual-review flag (question: \"{Truncate(q.Prompt, 50)}\").");
+ 
+             q.ReviewStatus = ImportedQuestionReviewStatus.Approved;
+             q.ReviewedByUserId = _currentUser.UserId;
+@@ -534,6 +566,7 @@ public class ImportService
+ 
+         var approvedQuestions = await _db.ImportedQuestions
+             .Include(q => q.Options)
++            .Include(q => q.Images)
+             .Where(q => q.QuestionBankVersionId == versionId
+                      && q.ReviewStatus == ImportedQuestionReviewStatus.Approved
+                      && q.PublishedQuestionId == null)
+@@ -551,9 +584,13 @@ public class ImportService
+                 Prompt = imported.Prompt,
+                 Explanation = imported.Explanation,
+                 Reference = imported.Reference,
++                QuestionType = imported.QuestionType,
+                 Status = QuestionStatus.Published,
+             };
+ 
++            if (imported.Images.Count > 0)
++                question.ImageUrl = $"/api/questions/{question.Id}/image";
++
+             foreach (var opt in imported.Options.OrderBy(o => o.SortOrder))
+             {
+                 question.Options.Add(new QuestionOption
+@@ -593,6 +630,17 @@ public class ImportService
+         return await _fileStorage.OpenReadAsync(image.StoredFilePath, ct);
+     }
+ 
++    public async Task<Stream> OpenPublishedQuestionImageAsync(Guid questionId, CancellationToken ct)
++    {
++        var image = await _db.ImportedQuestions
++            .Where(q => q.PublishedQuestionId == questionId)
++            .SelectMany(q => q.Images)
++            .OrderBy(i => i.SortOrder)
++            .FirstOrDefaultAsync(ct)
++            ?? throw new InvalidOperationException("Question image not found.");
++        return await _fileStorage.OpenReadAsync(image.StoredFilePath, ct);
++    }
++
+     // ---------------------------------------------------------------- Mapping helpers
+ 
+     private async Task<ImportJobDto> ToJobDtoAsync(ImportJob job, CancellationToken ct)
+@@ -621,10 +669,14 @@ public class ImportService
+ 
+     private static ImportedQuestionDto ToQuestionDto(ImportedQuestion q)
+     {
++        var images = q.Images?.OrderBy(i => i.SortOrder)
++            .Select(i => new ImportJobImageDto(i.Id, i.PageNumber, i.ImageKind, i.ImportedQuestionId)).ToList()
++            ?? new List<ImportJobImageDto>();
+         return new ImportedQuestionDto(
+             q.Id, q.Topic, q.Subtopic, q.Difficulty.ToString(), q.Prompt, q.Explanation, q.Reference,
++            q.QuestionType, q.RequiresManualReview, q.SourcePageStart, q.SourcePageEnd,
+             q.ReviewStatus.ToString(), q.ValidationIssues, q.IsDuplicate, q.DuplicateOfQuestionId, q.PublishedQuestionId,
+-            q.Options.OrderBy(o => o.SortOrder).Select(o => new ImportedQuestionOptionDto(o.Id, o.Text, o.IsCorrect, o.SortOrder)).ToList());
++            q.Options.OrderBy(o => o.SortOrder).Select(o => new ImportedQuestionOptionDto(o.Id, o.Text, o.IsCorrect, o.SortOrder)).ToList(), images);
+     }
+ 
+     private static string Truncate(string value, int maxLength) =>
+diff --git a/backend/src/CertMaster.Domain/Entities/ImportJob.cs b/backend/src/CertMaster.Domain/Entities/ImportJob.cs
+index 7efd67095fe39d70a35d73596028ed34e11ae77f..eb6feb3ea321df00cfdd5e75b8700386de9e4b5b 100644
+--- a/backend/src/CertMaster.Domain/Entities/ImportJob.cs
++++ b/backend/src/CertMaster.Domain/Entities/ImportJob.cs
+@@ -44,11 +44,8 @@ public class ImportJob : BaseEntity
+ 
+ /// <summary>
+ /// An image extracted from an uploaded file (currently PDF only). Stored and made
+-/// available to the admin during review, but — since reliably matching an image to
+-/// the specific question it belongs to requires real page-layout analysis, which
+-/// this release does not attempt — images are associated with the import job and a
+-/// page number only, not with an individual ImportedQuestion. An admin can view them
+-/// alongside the review queue and manually attach one to a question if needed.
++/// available to the admin during review. Page ranges detected by the PDF parser are
++/// used to associate each useful, non-repeated image with its imported question.
+ /// </summary>
+ public class ImportJobImage : BaseEntity
+ {
+@@ -56,6 +53,10 @@ public class ImportJobImage : BaseEntity
+     public ImportJob? ImportJob { get; set; }
+     public string StoredFilePath { get; set; } = string.Empty;
+     public int PageNumber { get; set; }
++    public Guid? ImportedQuestionId { get; set; }
++    public ImportedQuestion? ImportedQuestion { get; set; }
++    public string ImageKind { get; set; } = "Question";
++    public int SortOrder { get; set; }
+ }
+ 
+ /// <summary>
+@@ -80,6 +81,10 @@ public class ImportedQuestion : BaseEntity
+     public string Prompt { get; set; } = string.Empty;
+     public string Explanation { get; set; } = string.Empty;
+     public string? Reference { get; set; }
++    public string QuestionType { get; set; } = "Choice";
++    public bool RequiresManualReview { get; set; }
++    public int? SourcePageStart { get; set; }
++    public int? SourcePageEnd { get; set; }
+ 
+     public ImportedQuestionReviewStatus ReviewStatus { get; set; } = ImportedQuestionReviewStatus.PendingReview;
+ 
+@@ -100,6 +105,7 @@ public class ImportedQuestion : BaseEntity
+     public Guid? PublishedQuestionId { get; set; }
+ 
+     public ICollection<ImportedQuestionOption> Options { get; set; } = new List<ImportedQuestionOption>();
++    public ICollection<ImportJobImage> Images { get; set; } = new List<ImportJobImage>();
+ }
+ 
+ public class ImportedQuestionOption : BaseEntity
+diff --git a/backend/src/CertMaster.Domain/Entities/Question.cs b/backend/src/CertMaster.Domain/Entities/Question.cs
+index ecba7756a8b40ad136f2aff1b37394b2adde4cd0..33f659a0da7dda0304d2861917bbb79546870033 100644
+--- a/backend/src/CertMaster.Domain/Entities/Question.cs
++++ b/backend/src/CertMaster.Domain/Entities/Question.cs
+@@ -18,6 +18,8 @@ public class Question : BaseEntity
+     public string Explanation { get; set; } = string.Empty;
+     public string? Reference { get; set; }
+     public string? ImageUrl { get; set; }
++    public string QuestionType { get; set; } = "Choice";
++    public string? InteractionJson { get; set; }
+ 
+     public QuestionStatus Status { get; set; } = QuestionStatus.Draft;
+ 
+@@ -31,6 +33,7 @@ public class QuestionOption : BaseEntity
+     public string Text { get; set; } = string.Empty;
+     public bool IsCorrect { get; set; }
+     public int SortOrder { get; set; }
++    public string? ImageUrl { get; set; }
+ }
+ 
+ public class QuestionReport : BaseEntity
+diff --git a/backend/src/CertMaster.Infrastructure/DumpParsing/PdfDumpParser.cs b/backend/src/CertMaster.Infrastructure/DumpParsing/PdfDumpParser.cs
+index 3b9b43e71fc2c181900e2aaf370ff02bcc159518..255557ed8768735b73a7fca56c8479712e71ff33 100644
+--- a/backend/src/CertMaster.Infrastructure/DumpParsing/PdfDumpParser.cs
++++ b/backend/src/CertMaster.Infrastructure/DumpParsing/PdfDumpParser.cs
+@@ -1,14 +1,13 @@
+ using CertMaster.Application.Features.DumpUpload;
+ using UglyToad.PdfPig;
++using UglyToad.PdfPig.DocumentLayoutAnalysis.TextExtractor;
++using System.Text.RegularExpressions;
+ 
+ namespace CertMaster.Infrastructure.DumpParsing;
+ 
+ /// <summary>
+-/// Parses PDF dumps by extracting raw text per page and reusing the same
+-/// "Q: / A) / Answer: / Explanation:" block format as the TXT parser. PDF text
+-/// extraction quality varies by how the PDF was produced (native text vs. a
+-/// scanned image); scanned/image-only PDFs will yield no questions and should
+-/// be run through OCR before uploading.
++/// Parses common certification-dump layouts. It deliberately accepts several
++/// question, option and answer styles instead of relying on one vendor format.
+ /// </summary>
+ public class PdfDumpParser : IDumpParser
+ {
+@@ -17,15 +16,142 @@ public class PdfDumpParser : IDumpParser
+     public Task<List<ParsedQuestion>> ParseAsync(Stream fileStream, CancellationToken ct)
+     {
+         using var document = PdfDocument.Open(fileStream);
+-        var textBuilder = new System.Text.StringBuilder();
++        var pages = new List<(int Number, string Text)>();
+ 
+         foreach (var page in document.GetPages())
+         {
+             ct.ThrowIfCancellationRequested();
+-            textBuilder.AppendLine(page.Text);
+-            textBuilder.AppendLine("---"); // treat each page break as a potential question boundary
++            // ContentOrderTextExtractor retains line breaks far better than
++            // page.Text, which is essential for recognising A./B./C. options.
++            pages.Add((page.Number, ContentOrderTextExtractor.GetText(page)));
+         }
+ 
+-        return Task.FromResult(TxtDumpParser.ParseBlocks(textBuilder.ToString()));
++        return Task.FromResult(ParsePages(pages));
++    }
++
++    internal static List<ParsedQuestion> ParsePages(IReadOnlyList<(int Number, string Text)> pages)
++    {
++        const string pageMarker = "\n\u000cPAGE:{0}\u000c\n";
++        var combined = string.Concat(pages.Select(p => string.Format(pageMarker, p.Number) + p.Text));
++        var header = new Regex(@"(?im)^\s*Question\s*(?:#\s*)?:?\s*(\d+)\b[^\r\n]*", RegexOptions.Compiled);
++        var matches = header.Matches(combined);
++        var results = new List<ParsedQuestion>();
++
++        for (var i = 0; i < matches.Count; i++)
++        {
++            var start = matches[i].Index;
++            var end = i + 1 < matches.Count ? matches[i + 1].Index : combined.Length;
++            var block = combined[start..end];
++            var parsed = ParseQuestionBlock(block);
++            if (parsed is null) continue;
++
++            parsed.SourcePageStart = PageAt(combined, start);
++            parsed.SourcePageEnd = PageAt(combined, Math.Max(start, end - 1));
++            results.Add(parsed);
++        }
++
++        return results;
++    }
++
++    private static ParsedQuestion? ParseQuestionBlock(string block)
++    {
++        block = Regex.Replace(block, @"\n\u000cPAGE:\d+\u000c\n", "\n");
++        var lines = block.Replace("\r\n", "\n").Split('\n');
++        if (lines.Length == 0) return null;
++
++        var pq = new ParsedQuestion();
++        var category = Regex.Match(lines[0], @"\[([^\]]+)\]\s*$");
++        if (category.Success) pq.Topic = category.Groups[1].Value.Trim();
++
++        var optionRegex = new Regex(@"^\s*(?:[•●▪◦]\s*)?([A-Fa-f])[\)\.:]\s*(.*)$");
++        var answerRegex = new Regex(@"^\s*(?:Correct\s+)?Answer(?:\(s\))?\s*:\s*(.*)$", RegexOptions.IgnoreCase);
++        var prompt = new List<string>();
++        var options = new SortedDictionary<char, List<string>>();
++        var explanation = new List<string>();
++        char? activeOption = null;
++        var inExplanation = false;
++        var waitingForAnswer = false;
++        string answerText = string.Empty;
++
++        for (var lineIndex = 1; lineIndex < lines.Length; lineIndex++)
++        {
++            var line = lines[lineIndex].Trim();
++            if (line.Length == 0) continue;
++            if (line.Equals("Verified Answer", StringComparison.OrdinalIgnoreCase)) { waitingForAnswer = false; continue; }
++
++            if (Regex.IsMatch(line, @"^Explanation\s*:?.*$", RegexOptions.IgnoreCase))
++            {
++                inExplanation = true;
++                activeOption = null;
++                waitingForAnswer = false;
++                var inline = Regex.Replace(line, @"^Explanation\s*:?\s*", string.Empty, RegexOptions.IgnoreCase);
++                if (inline.Length > 0) explanation.Add(inline);
++                continue;
++            }
++
++            var answer = answerRegex.Match(line);
++            if (answer.Success)
++            {
++                answerText = answer.Groups[1].Value.Trim();
++                waitingForAnswer = answerText.Length == 0;
++                activeOption = null;
++                continue;
++            }
++
++            if (waitingForAnswer && Regex.IsMatch(line, @"^(?:[A-Fa-f](?:\s*(?:,|and|&)?\s*))+\s*$"))
++            {
++                answerText = line;
++                waitingForAnswer = false;
++                continue;
++            }
++
++            if (inExplanation) { explanation.Add(line); continue; }
++
++            var option = optionRegex.Match(line);
++            if (option.Success)
++            {
++                activeOption = char.ToUpperInvariant(option.Groups[1].Value[0]);
++                options[activeOption.Value] = new List<string>();
++                if (option.Groups[2].Value.Trim().Length > 0) options[activeOption.Value].Add(option.Groups[2].Value.Trim());
++                continue;
++            }
++
++            if (activeOption is not null)
++                options[activeOption.Value].Add(line);
++            else if (!Regex.IsMatch(line, @"^(Updated Dumps|Verified Questions|CertyIQ|Premium exam material|\d+ of \d+)", RegexOptions.IgnoreCase))
++                prompt.Add(line);
++        }
++
++        pq.Prompt = string.Join(" ", prompt).Trim();
++        foreach (var entry in options)
++            pq.Options.Add(string.Join(" ", entry.Value).Trim());
++        pq.Explanation = string.Join(" ", explanation).Trim();
++
++        foreach (Match letter in Regex.Matches(answerText.ToUpperInvariant(), @"\b[A-F]\b"))
++        {
++            var index = letter.Value[0] - 'A';
++            if (index >= 0 && index < pq.Options.Count && !pq.CorrectOptionIndexes.Contains(index))
++                pq.CorrectOptionIndexes.Add(index);
++        }
++
++        var simulationText = pq.Prompt + " " + string.Join(" ", pq.Options);
++        if (Regex.IsMatch(simulationText, @"\b(SIMULATION|INSTRUCTIONS|drag and drop|click on|enter commands|terminal)\b", RegexOptions.IgnoreCase))
++        {
++            pq.QuestionType = "Simulation";
++            pq.RequiresManualReview = true;
++        }
++        else if (pq.CorrectOptionIndexes.Count > 1 || Regex.IsMatch(pq.Prompt, @"\bselect\s+(two|three|all)\b", RegexOptions.IgnoreCase))
++        {
++            pq.QuestionType = "MultipleResponse";
++        }
++
++        return string.IsNullOrWhiteSpace(pq.Prompt) ? null : pq;
++    }
++
++    private static int? PageAt(string combined, int position)
++    {
++        var prefix = combined[..Math.Min(position, combined.Length)];
++        var matches = Regex.Matches(prefix, @"\u000cPAGE:(\d+)\u000c");
++        return matches.Count == 0 ? null : int.Parse(matches[^1].Groups[1].Value);
+     }
+ }
+diff --git a/backend/src/CertMaster.Infrastructure/DumpParsing/TxtDumpParser.cs b/backend/src/CertMaster.Infrastructure/DumpParsing/TxtDumpParser.cs
+index a908454a2212918fbcc75b838bf5a77b4b58d50f..cedaa00c9cba59b5d17b2b8d9279c06350c434a0 100644
+--- a/backend/src/CertMaster.Infrastructure/DumpParsing/TxtDumpParser.cs
++++ b/backend/src/CertMaster.Infrastructure/DumpParsing/TxtDumpParser.cs
+@@ -28,7 +28,7 @@ public class TxtDumpParser : IDumpParser
+ {
+     public IReadOnlyCollection<string> SupportedExtensions => new[] { ".txt" };
+ 
+-    private static readonly Regex OptionLine = new(@"^([A-Fa-f])\)\s*(.+)$", RegexOptions.Compiled);
++    private static readonly Regex OptionLine = new(@"^(?:[•●▪◦]\s*)?([A-Fa-f])[\)\.:]\s*(.+)$", RegexOptions.Compiled);
+ 
+     public async Task<List<ParsedQuestion>> ParseAsync(Stream fileStream, CancellationToken ct)
+     {
+@@ -50,7 +50,7 @@ public class TxtDumpParser : IDumpParser
+         {
+             var pq = new ParsedQuestion();
+             var optionTexts = new SortedDictionary<char, string>();
+-            string? answerLetter = null;
++            string? answerLetters = null;
+ 
+             foreach (var rawLine in block.Split('\n'))
+             {
+@@ -73,7 +73,7 @@ public class TxtDumpParser : IDumpParser
+                     case "q":
+                     case "question": pq.Prompt = value; break;
+                     case "answer":
+-                    case "correct": answerLetter = value?.Trim().ToUpperInvariant(); break;
++                    case "correct": answerLetters = value?.Trim().ToUpperInvariant(); break;
+                     case "explanation": pq.Explanation = value; break;
+                     case "reference": pq.Reference = value; break;
+                 }
+@@ -82,11 +82,14 @@ public class TxtDumpParser : IDumpParser
+             foreach (var kvp in optionTexts.OrderBy(o => o.Key))
+                 pq.Options.Add(kvp.Value);
+ 
+-            if (!string.IsNullOrEmpty(answerLetter) && answerLetter.Length == 1)
++            if (!string.IsNullOrEmpty(answerLetters))
+             {
+-                var index = answerLetter[0] - 'A';
+-                if (index >= 0 && index < pq.Options.Count)
+-                    pq.CorrectOptionIndex = index;
++                foreach (var letter in Regex.Matches(answerLetters, @"\b[A-F]\b").Cast<Match>().Select(m => m.Value[0]).Distinct())
++                {
++                    var index = letter - 'A';
++                    if (index >= 0 && index < pq.Options.Count)
++                        pq.CorrectOptionIndexes.Add(index);
++                }
+             }
+ 
+             if (!string.IsNullOrWhiteSpace(pq.Prompt))
+diff --git a/backend/src/CertMaster.Infrastructure/Migrations/20260922000100_AddQuestionMediaAndPbqSupport.cs b/backend/src/CertMaster.Infrastructure/Migrations/20260922000100_AddQuestionMediaAndPbqSupport.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..29168f6dbda759354d97895d8696d234d37163f3
+--- /dev/null
++++ b/backend/src/CertMaster.Infrastructure/Migrations/20260922000100_AddQuestionMediaAndPbqSupport.cs
+@@ -0,0 +1,49 @@
++using Microsoft.EntityFrameworkCore.Migrations;
++
++#nullable disable
++
++namespace CertMaster.Infrastructure.Migrations;
++
++public partial class AddQuestionMediaAndPbqSupport : Migration
++{
++    protected override void Up(MigrationBuilder migrationBuilder)
++    {
++        migrationBuilder.AddColumn<Guid>(name: "ImportedQuestionId", table: "ImportJobImages", type: "uuid", nullable: true);
++        migrationBuilder.AddColumn<string>(name: "ImageKind", table: "ImportJobImages", type: "text", nullable: false, defaultValue: "Question");
++        migrationBuilder.AddColumn<int>(name: "SortOrder", table: "ImportJobImages", type: "integer", nullable: false, defaultValue: 0);
++
++        migrationBuilder.AddColumn<string>(name: "QuestionType", table: "ImportedQuestions", type: "text", nullable: false, defaultValue: "Choice");
++        migrationBuilder.AddColumn<bool>(name: "RequiresManualReview", table: "ImportedQuestions", type: "boolean", nullable: false, defaultValue: false);
++        migrationBuilder.AddColumn<int>(name: "SourcePageStart", table: "ImportedQuestions", type: "integer", nullable: true);
++        migrationBuilder.AddColumn<int>(name: "SourcePageEnd", table: "ImportedQuestions", type: "integer", nullable: true);
++
++        migrationBuilder.AddColumn<string>(name: "QuestionType", table: "Questions", type: "text", nullable: false, defaultValue: "Choice");
++        migrationBuilder.AddColumn<string>(name: "InteractionJson", table: "Questions", type: "text", nullable: true);
++        migrationBuilder.AddColumn<string>(name: "ImageUrl", table: "QuestionOptions", type: "text", nullable: true);
++
++        migrationBuilder.CreateIndex(name: "IX_ImportJobImages_ImportedQuestionId", table: "ImportJobImages", column: "ImportedQuestionId");
++        migrationBuilder.AddForeignKey(
++            name: "FK_ImportJobImages_ImportedQuestions_ImportedQuestionId",
++            table: "ImportJobImages",
++            column: "ImportedQuestionId",
++            principalTable: "ImportedQuestions",
++            principalColumn: "Id",
++            onDelete: ReferentialAction.SetNull);
++    }
++
++    protected override void Down(MigrationBuilder migrationBuilder)
++    {
++        migrationBuilder.DropForeignKey(name: "FK_ImportJobImages_ImportedQuestions_ImportedQuestionId", table: "ImportJobImages");
++        migrationBuilder.DropIndex(name: "IX_ImportJobImages_ImportedQuestionId", table: "ImportJobImages");
++        migrationBuilder.DropColumn(name: "ImportedQuestionId", table: "ImportJobImages");
++        migrationBuilder.DropColumn(name: "ImageKind", table: "ImportJobImages");
++        migrationBuilder.DropColumn(name: "SortOrder", table: "ImportJobImages");
++        migrationBuilder.DropColumn(name: "QuestionType", table: "ImportedQuestions");
++        migrationBuilder.DropColumn(name: "RequiresManualReview", table: "ImportedQuestions");
++        migrationBuilder.DropColumn(name: "SourcePageStart", table: "ImportedQuestions");
++        migrationBuilder.DropColumn(name: "SourcePageEnd", table: "ImportedQuestions");
++        migrationBuilder.DropColumn(name: "QuestionType", table: "Questions");
++        migrationBuilder.DropColumn(name: "InteractionJson", table: "Questions");
++        migrationBuilder.DropColumn(name: "ImageUrl", table: "QuestionOptions");
++    }
++}
+diff --git a/backend/src/CertMaster.Infrastructure/Migrations/AppDbContextModelSnapshot.cs b/backend/src/CertMaster.Infrastructure/Migrations/AppDbContextModelSnapshot.cs
+index af72a2bf891466f66fec3a2699ed8fb99b2e05ed..a5a3353d2de5ce3c151f7e6ad8b771a5c782303d 100644
+--- a/backend/src/CertMaster.Infrastructure/Migrations/AppDbContextModelSnapshot.cs
++++ b/backend/src/CertMaster.Infrastructure/Migrations/AppDbContextModelSnapshot.cs
+@@ -311,14 +311,24 @@ namespace CertMaster.Infrastructure.Migrations
+                     b.Property<DateTime>("CreatedAtUtc")
+                         .HasColumnType("timestamp with time zone");
+ 
+-                    b.Property<Guid>("ImportJobId")
+-                        .HasColumnType("uuid");
++                    b.Property<Guid>("ImportJobId")
++                        .HasColumnType("uuid");
++
++                    b.Property<string>("ImageKind")
++                        .IsRequired()
++                        .HasColumnType("text");
++
++                    b.Property<Guid?>("ImportedQuestionId")
++                        .HasColumnType("uuid");
+ 
+                     b.Property<DateTime?>("ModifiedAtUtc")
+                         .HasColumnType("timestamp with time zone");
+ 
+-                    b.Property<int>("PageNumber")
+-                        .HasColumnType("integer");
++                    b.Property<int>("PageNumber")
++                        .HasColumnType("integer");
++
++                    b.Property<int>("SortOrder")
++                        .HasColumnType("integer");
+ 
+                     b.Property<string>("StoredFilePath")
+                         .IsRequired()
+@@ -326,7 +336,9 @@ namespace CertMaster.Infrastructure.Migrations
+ 
+                     b.HasKey("Id");
+ 
+-                    b.HasIndex("ImportJobId");
++                    b.HasIndex("ImportJobId");
++
++                    b.HasIndex("ImportedQuestionId");
+ 
+                     b.ToTable("ImportJobImages");
+                 });
+@@ -369,8 +381,21 @@ namespace CertMaster.Infrastructure.Migrations
+                     b.Property<Guid?>("PublishedQuestionId")
+                         .HasColumnType("uuid");
+ 
+-                    b.Property<Guid>("QuestionBankVersionId")
+-                        .HasColumnType("uuid");
++                    b.Property<Guid>("QuestionBankVersionId")
++                        .HasColumnType("uuid");
++
++                    b.Property<string>("QuestionType")
++                        .IsRequired()
++                        .HasColumnType("text");
++
++                    b.Property<bool>("RequiresManualReview")
++                        .HasColumnType("boolean");
++
++                    b.Property<int?>("SourcePageEnd")
++                        .HasColumnType("integer");
++
++                    b.Property<int?>("SourcePageStart")
++                        .HasColumnType("integer");
+ 
+                     b.Property<string>("Reference")
+                         .HasColumnType("text");
+@@ -569,8 +594,11 @@ namespace CertMaster.Infrastructure.Migrations
+                         .IsRequired()
+                         .HasColumnType("text");
+ 
+-                    b.Property<string>("ImageUrl")
+-                        .HasColumnType("text");
++                    b.Property<string>("ImageUrl")
++                        .HasColumnType("text");
++
++                    b.Property<string>("InteractionJson")
++                        .HasColumnType("text");
+ 
+                     b.Property<DateTime?>("ModifiedAtUtc")
+                         .HasColumnType("timestamp with time zone");
+@@ -579,8 +607,12 @@ namespace CertMaster.Infrastructure.Migrations
+                         .IsRequired()
+                         .HasColumnType("text");
+ 
+-                    b.Property<Guid>("QuestionBankVersionId")
+-                        .HasColumnType("uuid");
++                    b.Property<Guid>("QuestionBankVersionId")
++                        .HasColumnType("uuid");
++
++                    b.Property<string>("QuestionType")
++                        .IsRequired()
++                        .HasColumnType("text");
+ 
+                     b.Property<string>("Reference")
+                         .HasColumnType("text");
+@@ -661,8 +693,11 @@ namespace CertMaster.Infrastructure.Migrations
+                     b.Property<DateTime>("CreatedAtUtc")
+                         .HasColumnType("timestamp with time zone");
+ 
+-                    b.Property<bool>("IsCorrect")
+-                        .HasColumnType("boolean");
++                    b.Property<bool>("IsCorrect")
++                        .HasColumnType("boolean");
++
++                    b.Property<string>("ImageUrl")
++                        .HasColumnType("text");
+ 
+                     b.Property<DateTime?>("ModifiedAtUtc")
+                         .HasColumnType("timestamp with time zone");
+@@ -929,18 +964,25 @@ namespace CertMaster.Infrastructure.Migrations
+                     b.Navigation("QuestionBankVersion");
+                 });
+ 
+-            modelBuilder.Entity("CertMaster.Domain.Entities.ImportJobImage", b =>
+-                {
++            modelBuilder.Entity("CertMaster.Domain.Entities.ImportJobImage", b =>
++                {
+                     b.HasOne("CertMaster.Domain.Entities.ImportJob", "ImportJob")
+                         .WithMany("ExtractedImages")
+                         .HasForeignKey("ImportJobId")
+-                        .OnDelete(DeleteBehavior.Cascade)
+-                        .IsRequired();
+-
+-                    b.Navigation("ImportJob");
++                        .OnDelete(DeleteBehavior.Cascade)
++                        .IsRequired();
++
++                    b.HasOne("CertMaster.Domain.Entities.ImportedQuestion", "ImportedQuestion")
++                        .WithMany("Images")
++                        .HasForeignKey("ImportedQuestionId")
++                        .OnDelete(DeleteBehavior.SetNull);
++
++                    b.Navigation("ImportJob");
++
++                    b.Navigation("ImportedQuestion");
+                 });
+ 
+-            modelBuilder.Entity("CertMaster.Domain.Entities.ImportedQuestion", b =>
++            modelBuilder.Entity("CertMaster.Domain.Entities.ImportedQuestion", b =>
+                 {
+                     b.HasOne("CertMaster.Domain.Entities.Certification", "Certification")
+                         .WithMany()
+@@ -964,7 +1006,9 @@ namespace CertMaster.Infrastructure.Migrations
+ 
+                     b.Navigation("ImportJob");
+ 
+-                    b.Navigation("QuestionBankVersion");
++                    b.Navigation("QuestionBankVersion");
++
++                    b.Navigation("Images");
+                 });
+ 
+             modelBuilder.Entity("CertMaster.Domain.Entities.ImportedQuestionOption", b =>
+diff --git a/backend/src/CertMaster.Infrastructure/Persistence/Configurations/EntityConfigurations.cs b/backend/src/CertMaster.Infrastructure/Persistence/Configurations/EntityConfigurations.cs
+index 3d1b30c8dd9193ef2e8dd6910997ba7875319810..471e529a16f4a2a35d62ece99e8d0232a596a1c6 100644
+--- a/backend/src/CertMaster.Infrastructure/Persistence/Configurations/EntityConfigurations.cs
++++ b/backend/src/CertMaster.Infrastructure/Persistence/Configurations/EntityConfigurations.cs
+@@ -90,7 +90,7 @@ public class RefreshTokenConfiguration : IEntityTypeConfiguration<RefreshToken>
+     }
+ }
+ 
+-public class ImportJobConfiguration : IEntityTypeConfiguration<ImportJob>
++public class ImportJobConfiguration : IEntityTypeConfiguration<ImportJob>
+ {
+     public void Configure(EntityTypeBuilder<ImportJob> builder)
+     {
+@@ -112,9 +112,9 @@ public class ImportJobConfiguration : IEntityTypeConfiguration<ImportJob>
+             .HasForeignKey(q => q.ImportJobId)
+             .OnDelete(DeleteBehavior.Cascade);
+     }
+-}
++}
+ 
+-public class ImportedQuestionConfiguration : IEntityTypeConfiguration<ImportedQuestion>
++public class ImportedQuestionConfiguration : IEntityTypeConfiguration<ImportedQuestion>
+ {
+     public void Configure(EntityTypeBuilder<ImportedQuestion> builder)
+     {
+@@ -130,9 +130,14 @@ public class ImportedQuestionConfiguration : IEntityTypeConfiguration<ImportedQu
+             .HasForeignKey(q => q.CertificationId)
+             .OnDelete(DeleteBehavior.Restrict);
+ 
+-        builder.HasMany(q => q.Options)
++        builder.HasMany(q => q.Options)
+             .WithOne(o => o.ImportedQuestion!)
+             .HasForeignKey(o => o.ImportedQuestionId)
+-            .OnDelete(DeleteBehavior.Cascade);
++            .OnDelete(DeleteBehavior.Cascade);
++
++        builder.HasMany(q => q.Images)
++            .WithOne(i => i.ImportedQuestion)
++            .HasForeignKey(i => i.ImportedQuestionId)
++            .OnDelete(DeleteBehavior.SetNull);
+     }
+ }
+diff --git a/frontend/src/hooks/useImportData.ts b/frontend/src/hooks/useImportData.ts
+index ea10a18331ca17185a8a2835f7711a6da6fad64e..1059a4024a7092e64df17829b196e29c197b70dc 100644
+--- a/frontend/src/hooks/useImportData.ts
++++ b/frontend/src/hooks/useImportData.ts
+@@ -106,28 +106,34 @@ export function useStartImport() {
+               topic: "General",
+               difficulty: "Medium",
+               prompt: "Sample imported question — mock mode doesn't parse real files.",
+-              explanation: "This is a placeholder shown only in mock mode.",
++              explanation: "This is a placeholder shown only in mock mode.",
++              questionType: "Choice",
++              requiresManualReview: false,
+               reviewStatus: "PendingReview",
+               validationIssues: "",
+               isDuplicate: false,
+-              options: [
++              options: [
+                 { id: "o1", text: "Option A", isCorrect: true, sortOrder: 1 },
+                 { id: "o2", text: "Option B", isCorrect: false, sortOrder: 2 },
+-              ],
++              ],
++              images: [],
+             },
+             {
+               id: `${jobId}-q2`,
+               topic: "General",
+               difficulty: "Easy",
+               prompt: "A second sample question with a validation issue.",
+-              explanation: "",
++              explanation: "",
++              questionType: "Choice",
++              requiresManualReview: false,
+               reviewStatus: "PendingReview",
+               validationIssues: "No correct answer could be identified.",
+               isDuplicate: false,
+-              options: [
++              options: [
+                 { id: "o3", text: "Option A", isCorrect: false, sortOrder: 1 },
+                 { id: "o4", text: "Option B", isCorrect: false, sortOrder: 2 },
+-              ],
++              ],
++              images: [],
+             },
+           ],
+           extractedImages: [],
+@@ -166,9 +172,11 @@ export function useUpdateImportedQuestion() {
+         subtopic: question.subtopic,
+         difficulty: question.difficulty,
+         prompt: question.prompt,
+-        explanation: question.explanation,
+-        reference: question.reference,
+-        options: question.options?.map((o) => ({ id: o.id, text: o.text, isCorrect: o.isCorrect })),
++        explanation: question.explanation,
++        reference: question.reference,
++        questionType: question.questionType,
++        requiresManualReview: question.requiresManualReview,
++        options: question.options?.map((o) => ({ id: o.id, text: o.text, isCorrect: o.isCorrect })),
+       });
+       return data;
+     },
+diff --git a/frontend/src/pages/admin/ImportReview.tsx b/frontend/src/pages/admin/ImportReview.tsx
+index b1dde6a7935e1b6f15dbdad6b071d04ceb4ac91e..e091c5943f3b94e7103a4e90e74d16da3a251409 100644
+--- a/frontend/src/pages/admin/ImportReview.tsx
++++ b/frontend/src/pages/admin/ImportReview.tsx
+@@ -11,6 +11,20 @@ import {
+ import { Card, SectionHeading, Badge } from "../../components/ui/Primitives";
+ import { Button } from "../../components/ui/Button";
+ import type { ImportedQuestion } from "../../types";
++import { api } from "../../lib/api";
++
++function ImportedImage({ imageId, pageNumber }: { imageId: string; pageNumber: number }) {
++  const [url, setUrl] = useState<string>();
++  useEffect(() => {
++    let objectUrl: string | undefined;
++    api.get(`/admin/imports/images/${imageId}`, { responseType: "blob" }).then(({ data }) => {
++      objectUrl = URL.createObjectURL(data);
++      setUrl(objectUrl);
++    });
++    return () => { if (objectUrl) URL.revokeObjectURL(objectUrl); };
++  }, [imageId]);
++  return url ? <img src={url} alt={`Imported question media from PDF page ${pageNumber}`} className="max-h-96 max-w-full rounded-md border border-border-subtle object-contain" /> : null;
++}
+ 
+ function EditableQuestion({ question }: { question: ImportedQuestion }) {
+   const updateQuestion = useUpdateImportedQuestion();
+@@ -35,7 +49,13 @@ function EditableQuestion({ question }: { question: ImportedQuestion }) {
+   };
+ 
+   const setCorrectOption = (index: number) => {
+-    setDraft((d) => ({ ...d, options: d.options.map((o, i) => ({ ...o, isCorrect: i === index })) }));
++    setDraft((d) => ({
++      ...d,
++      options: d.options.map((o, i) => ({
++        ...o,
++        isCorrect: d.questionType === "MultipleResponse" ? (i === index ? !o.isCorrect : o.isCorrect) : i === index,
++      })),
++    }));
+   };
+ 
+   return (
+@@ -83,6 +103,40 @@ function EditableQuestion({ question }: { question: ImportedQuestion }) {
+         </select>
+       </div>
+ 
++      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
++        <select
++          value={draft.questionType}
++          onChange={(e) => setDraft((d) => ({ ...d, questionType: e.target.value }))}
++          disabled={isPublished}
++          className="h-10 px-3 rounded-md border border-border-subtle text-sm disabled:bg-bg-alt"
++        >
++          <option value="Choice">Single choice</option>
++          <option value="MultipleResponse">Multiple response</option>
++          <option value="Simulation">PBQ / simulation</option>
++        </select>
++        <label className="flex items-center gap-2 h-10 px-3 rounded-md border border-border-subtle text-sm">
++          <input
++            type="checkbox"
++            checked={draft.requiresManualReview}
++            onChange={(e) => setDraft((d) => ({ ...d, requiresManualReview: e.target.checked }))}
++            disabled={isPublished}
++          />
++          Needs manual PBQ review
++        </label>
++      </div>
++
++      {(draft.sourcePageStart || draft.images.length > 0) && (
++        <div className="mb-3 text-xs text-text-secondary">
++          {draft.sourcePageStart && <>PDF page {draft.sourcePageStart}{draft.sourcePageEnd && draft.sourcePageEnd !== draft.sourcePageStart ? `-${draft.sourcePageEnd}` : ""}</>}
++        </div>
++      )}
++
++      {draft.images.length > 0 && (
++        <div className="mb-4 flex flex-wrap gap-3">
++          {draft.images.map((img) => <ImportedImage key={img.id} imageId={img.id} pageNumber={img.pageNumber} />)}
++        </div>
++      )}
++
+       <textarea
+         value={draft.prompt}
+         onChange={(e) => setDraft((d) => ({ ...d, prompt: e.target.value }))}
+@@ -96,7 +150,7 @@ function EditableQuestion({ question }: { question: ImportedQuestion }) {
+         {draft.options.map((opt, i) => (
+           <div key={opt.id || i} className="flex items-center gap-2">
+             <input
+-              type="radio"
++              type={draft.questionType === "MultipleResponse" ? "checkbox" : "radio"}
+               checked={opt.isCorrect}
+               onChange={() => setCorrectOption(i)}
+               disabled={isPublished}
+diff --git a/frontend/src/types/index.ts b/frontend/src/types/index.ts
+index 5c27e2e9972549c111b969a2239d6177b27e4128..58fd4a81d4035d974701d5fa1277c9f813f599b5 100644
+--- a/frontend/src/types/index.ts
++++ b/frontend/src/types/index.ts
+@@ -224,26 +224,33 @@ export interface ImportedQuestionOption {
+   sortOrder: number;
+ }
+ 
+-export interface ImportedQuestion {
++export interface ImportedQuestion {
+   id: string;
+   topic: string;
+   subtopic?: string;
+   difficulty: string;
+   prompt: string;
+   explanation: string;
+-  reference?: string;
++  reference?: string;
++  questionType: "Choice" | "MultipleResponse" | "Simulation" | string;
++  requiresManualReview: boolean;
++  sourcePageStart?: number;
++  sourcePageEnd?: number;
+   reviewStatus: ImportedQuestionReviewStatus;
+   validationIssues: string;
+   isDuplicate: boolean;
+   duplicateOfQuestionId?: string;
+   publishedQuestionId?: string;
+-  options: ImportedQuestionOption[];
+-}
++  options: ImportedQuestionOption[];
++  images: ImportJobImageInfo[];
++}
+ 
+-export interface ImportJobImageInfo {
+-  id: string;
+-  pageNumber: number;
+-}
++export interface ImportJobImageInfo {
++  id: string;
++  pageNumber: number;
++  imageKind: string;
++  importedQuestionId?: string;
++}
+ 
+ export interface ImportJobDetail {
+   job: ImportJob;

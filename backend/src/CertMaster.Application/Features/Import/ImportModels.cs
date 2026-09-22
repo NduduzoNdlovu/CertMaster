@@ -40,14 +40,19 @@ public record ImportedQuestionDto(
     string Prompt,
     string Explanation,
     string? Reference,
+    string QuestionType,
+    bool RequiresManualReview,
+    int? SourcePageStart,
+    int? SourcePageEnd,
     string ReviewStatus,
     string ValidationIssues,
     bool IsDuplicate,
     Guid? DuplicateOfQuestionId,
     Guid? PublishedQuestionId,
-    List<ImportedQuestionOptionDto> Options);
+    List<ImportedQuestionOptionDto> Options,
+    List<ImportJobImageDto> Images);
 
-public record ImportJobImageDto(Guid Id, int PageNumber);
+public record ImportJobImageDto(Guid Id, int PageNumber, string ImageKind, Guid? ImportedQuestionId);
 
 public record ImportJobDetailDto(ImportJobDto Job, List<ImportedQuestionDto> Questions, List<ImportJobImageDto> ExtractedImages);
 
@@ -60,6 +65,8 @@ public record UpdateImportedQuestionRequest(
     string Prompt,
     string Explanation,
     string? Reference,
+    string QuestionType,
+    bool RequiresManualReview,
     List<UpdateImportedQuestionOptionRequest> Options);
 
 public record ApproveQuestionsRequest(List<Guid> ImportedQuestionIds);

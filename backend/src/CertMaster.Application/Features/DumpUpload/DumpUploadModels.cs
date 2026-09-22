@@ -14,17 +14,32 @@ public class ParsedQuestion
     public string? DifficultyRaw { get; set; }
     public string? Prompt { get; set; }
     public List<string> Options { get; set; } = new();
-    public int CorrectOptionIndex { get; set; } = -1; // 0-based
+    // Multiple-response questions ("Select two", "Choose all") are common in
+    // CompTIA material, so parsers must not collapse the answer to one option.
+    public List<int> CorrectOptionIndexes { get; set; } = new(); // 0-based
+    public int CorrectOptionIndex
+    {
+        get => CorrectOptionIndexes.FirstOrDefault(-1);
+        set
+        {
+            CorrectOptionIndexes.Clear();
+            if (value >= 0) CorrectOptionIndexes.Add(value);
+        }
+    }
     public string? Explanation { get; set; }
     public string? Reference { get; set; }
+    public int? SourcePageStart { get; set; }
+    public int? SourcePageEnd { get; set; }
+    public string QuestionType { get; set; } = "Choice";
+    public bool RequiresManualReview { get; set; }
 
     public List<string> ValidationErrors { get; } = new();
 
     public bool IsValid =>
         !string.IsNullOrWhiteSpace(Prompt) &&
         Options.Count(o => !string.IsNullOrWhiteSpace(o)) >= 2 &&
-        CorrectOptionIndex >= 0 &&
-        CorrectOptionIndex < Options.Count;
+        CorrectOptionIndexes.Count > 0 &&
+        CorrectOptionIndexes.All(i => i >= 0 && i < Options.Count);
 
     public Difficulty ResolveDifficulty()
     {

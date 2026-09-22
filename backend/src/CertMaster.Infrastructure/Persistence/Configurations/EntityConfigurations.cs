@@ -134,5 +134,10 @@ public class ImportedQuestionConfiguration : IEntityTypeConfiguration<ImportedQu
             .WithOne(o => o.ImportedQuestion!)
             .HasForeignKey(o => o.ImportedQuestionId)
             .OnDelete(DeleteBehavior.Cascade);
+
+        builder.HasMany(q => q.Images)
+            .WithOne(i => i.ImportedQuestion)
+            .HasForeignKey(i => i.ImportedQuestionId)
+            .OnDelete(DeleteBehavior.SetNull);
     }
 }

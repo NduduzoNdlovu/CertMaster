@@ -11,6 +11,20 @@ import {
 import { Card, SectionHeading, Badge } from "../../components/ui/Primitives";
 import { Button } from "../../components/ui/Button";
 import type { ImportedQuestion } from "../../types";
+import { api } from "../../lib/api";
+
+function ImportedImage({ imageId, pageNumber }: { imageId: string; pageNumber: number }) {
+  const [url, setUrl] = useState<string>();
+  useEffect(() => {
+    let objectUrl: string | undefined;
+    api.get(`/admin/imports/images/${imageId}`, { responseType: "blob" }).then(({ data }) => {
+      objectUrl = URL.createObjectURL(data);
+      setUrl(objectUrl);
+    });
+    return () => { if (objectUrl) URL.revokeObjectURL(objectUrl); };
+  }, [imageId]);
+  return url ? <img src={url} alt={`Imported question media from PDF page ${pageNumber}`} className="max-h-96 max-w-full rounded-md border border-border-subtle object-contain" /> : null;
+}
 
 function EditableQuestion({ question }: { question: ImportedQuestion }) {
   const updateQuestion = useUpdateImportedQuestion();
@@ -35,7 +49,13 @@ function EditableQuestion({ question }: { question: ImportedQuestion }) {
   };
 
   const setCorrectOption = (index: number) => {
-    setDraft((d) => ({ ...d, options: d.options.map((o, i) => ({ ...o, isCorrect: i === index })) }));
+    setDraft((d) => ({
+      ...d,
+      options: d.options.map((o, i) => ({
+        ...o,
+        isCorrect: d.questionType === "MultipleResponse" ? (i === index ? !o.isCorrect : o.isCorrect) : i === index,
+      })),
+    }));
   };
 
   return (
@@ -83,6 +103,40 @@ function EditableQuestion({ question }: { question: ImportedQuestion }) {
         </select>
       </div>
 
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+        <select
+          value={draft.questionType}
+          onChange={(e) => setDraft((d) => ({ ...d, questionType: e.target.value }))}
+          disabled={isPublished}
+          className="h-10 px-3 rounded-md border border-border-subtle text-sm disabled:bg-bg-alt"
+        >
+          <option value="Choice">Single choice</option>
+          <option value="MultipleResponse">Multiple response</option>
+          <option value="Simulation">PBQ / simulation</option>
+        </select>
+        <label className="flex items-center gap-2 h-10 px-3 rounded-md border border-border-subtle text-sm">
+          <input
+            type="checkbox"
+            checked={draft.requiresManualReview}
+            onChange={(e) => setDraft((d) => ({ ...d, requiresManualReview: e.target.checked }))}
+            disabled={isPublished}
+          />
+          Needs manual PBQ review
+        </label>
+      </div>
+
+      {(draft.sourcePageStart || draft.images.length > 0) && (
+        <div className="mb-3 text-xs text-text-secondary">
+          {draft.sourcePageStart && <>PDF page {draft.sourcePageStart}{draft.sourcePageEnd && draft.sourcePageEnd !== draft.sourcePageStart ? `-${draft.sourcePageEnd}` : ""}</>}
+        </div>
+      )}
+
+      {draft.images.length > 0 && (
+        <div className="mb-4 flex flex-wrap gap-3">
+          {draft.images.map((img) => <ImportedImage key={img.id} imageId={img.id} pageNumber={img.pageNumber} />)}
+        </div>
+      )}
+
       <textarea
         value={draft.prompt}
         onChange={(e) => setDraft((d) => ({ ...d, prompt: e.target.value }))}
@@ -96,7 +150,7 @@ function EditableQuestion({ question }: { question: ImportedQuestion }) {
         {draft.options.map((opt, i) => (
           <div key={opt.id || i} className="flex items-center gap-2">
             <input
-              type="radio"
+              type={draft.questionType === "MultipleResponse" ? "checkbox" : "radio"}
               checked={opt.isCorrect}
               onChange={() => setCorrectOption(i)}
               disabled={isPublished}

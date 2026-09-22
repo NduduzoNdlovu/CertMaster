@@ -190,12 +190,6 @@ public class ImportService
         buffer.Position = 0;
         var parsedQuestions = await parser.ParseAsync(buffer, ct);
 
-        if (sourceFormat == DumpSourceFormat.Pdf)
-        {
-            buffer.Position = 0;
-            await ExtractPdfImagesAsync(job, buffer, ct);
-        }
-
         // ---- Detect question boundaries / options / correct answers / explanations ----
         // (all handled inside the parser — ParsedQuestion already reflects this)
         job.Status = ImportJobStatus.DetectingQuestions;
@@ -244,8 +238,10 @@ public class ImportService
             if (string.IsNullOrWhiteSpace(pq.Prompt)) issues.Add("No question text found.");
             var nonEmptyOptions = pq.Options.Count(o => !string.IsNullOrWhiteSpace(o));
             if (nonEmptyOptions < 2) issues.Add($"Only {nonEmptyOptions} answer option(s) found (need at least 2).");
-            if (pq.CorrectOptionIndex < 0 || pq.CorrectOptionIndex >= pq.Options.Count)
+            if (pq.CorrectOptionIndexes.Count == 0 || pq.CorrectOptionIndexes.Any(i => i < 0 || i >= pq.Options.Count))
                 issues.Add("No correct answer could be identified.");
+            if (pq.RequiresManualReview)
+                issues.Add("Interactive PBQ/simulation detected. Configure and verify it manually before approval.");
             if (pq.Options.Select(o => o.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).Count() < pq.Options.Count)
                 issues.Add("Two or more answer options are identical.");
 
@@ -284,6 +280,10 @@ public class ImportService
                 Prompt = normalizedPrompt,
                 Explanation = pq.Explanation ?? string.Empty,
                 Reference = pq.Reference,
+                QuestionType = pq.QuestionType,
+                RequiresManualReview = pq.RequiresManualReview,
+                SourcePageStart = pq.SourcePageStart,
+                SourcePageEnd = pq.SourcePageEnd,
                 ReviewStatus = ImportedQuestionReviewStatus.PendingReview,
                 ValidationIssues = string.Join(" ", issues),
                 IsDuplicate = isDuplicate,
@@ -295,12 +295,21 @@ public class ImportService
                 importedQuestion.Options.Add(new ImportedQuestionOption
                 {
                     Text = pq.Options[i],
-                    IsCorrect = i == pq.CorrectOptionIndex,
+                    IsCorrect = pq.CorrectOptionIndexes.Contains(i),
                     SortOrder = i + 1,
                 });
             }
 
             _db.ImportedQuestions.Add(importedQuestion);
+        }
+
+        // Persist questions first so extracted PDF images can be associated by
+        // their page number instead of being left as an unstructured gallery.
+        await _db.SaveChangesAsync(ct);
+        if (sourceFormat == DumpSourceFormat.Pdf)
+        {
+            buffer.Position = 0;
+            await ExtractPdfImagesAsync(job, buffer, ct);
         }
 
         // ---- Ready for administrator review ----
@@ -336,23 +345,39 @@ public class ImportService
         try
         {
             using var document = UglyToad.PdfPig.PdfDocument.Open(buffer);
+            var imported = await _db.ImportedQuestions
+                .Where(q => q.ImportJobId == job.Id)
+                .ToListAsync(ct);
+            var seenImageHashes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var pageNumber = 0;
             foreach (var page in document.GetPages())
             {
                 pageNumber++;
+                var sortOrder = 0;
                 foreach (var image in page.GetImages())
                 {
                     ct.ThrowIfCancellationRequested();
+                    // Tiny/repeated page decorations are not useful question media.
+                    if (image.Bounds.Width < 40 || image.Bounds.Height < 30) continue;
                     if (!image.TryGetPng(out var pngBytes)) continue;
+                    var imageHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(pngBytes));
+                    if (!seenImageHashes.Add(imageHash)) continue; // repeated logo/banner/page decoration
 
                     using var imageStream = new MemoryStream(pngBytes);
                     var stored = await _fileStorage.SaveAsync(imageStream, $"page-{pageNumber}.png", ct);
+
+                    var linkedQuestion = imported.FirstOrDefault(q =>
+                        q.SourcePageStart is not null && q.SourcePageEnd is not null &&
+                        pageNumber >= q.SourcePageStart && pageNumber <= q.SourcePageEnd);
 
                     _db.ImportJobImages.Add(new ImportJobImage
                     {
                         ImportJobId = job.Id,
                         StoredFilePath = stored.StoragePath,
                         PageNumber = pageNumber,
+                        ImportedQuestionId = linkedQuestion?.Id,
+                        ImageKind = linkedQuestion?.QuestionType == "Simulation" ? "Simulation" : "Question",
+                        SortOrder = ++sortOrder,
                     });
                 }
             }
@@ -387,6 +412,7 @@ public class ImportService
 
         var questions = await _db.ImportedQuestions
             .Include(q => q.Options)
+            .Include(q => q.Images)
             .Where(q => q.ImportJobId == jobId)
             .OrderBy(q => q.CreatedAtUtc)
             .ToListAsync(ct);
@@ -394,13 +420,14 @@ public class ImportService
         return new ImportJobDetailDto(
             ToJobDto(job),
             questions.Select(ToQuestionDto).ToList(),
-            job.ExtractedImages.Select(i => new ImportJobImageDto(i.Id, i.PageNumber)).ToList());
+            job.ExtractedImages.Select(i => new ImportJobImageDto(i.Id, i.PageNumber, i.ImageKind, i.ImportedQuestionId)).ToList());
     }
 
     public async Task<ImportedQuestionDto> UpdateImportedQuestionAsync(Guid id, UpdateImportedQuestionRequest request, CancellationToken ct)
     {
         var question = await _db.ImportedQuestions
             .Include(q => q.Options)
+            .Include(q => q.Images)
             .FirstOrDefaultAsync(q => q.Id == id, ct)
             ?? throw new InvalidOperationException("Imported question not found.");
 
@@ -418,6 +445,8 @@ public class ImportService
         question.Prompt = TextNormalizer.NormalizeText(request.Prompt);
         question.Explanation = TextNormalizer.NormalizeText(request.Explanation);
         question.Reference = string.IsNullOrWhiteSpace(request.Reference) ? null : TextNormalizer.NormalizeText(request.Reference);
+        question.QuestionType = string.IsNullOrWhiteSpace(request.QuestionType) ? "Choice" : request.QuestionType.Trim();
+        question.RequiresManualReview = request.RequiresManualReview;
 
         // Replace options wholesale — simplest correct approach for admin corrections.
         _db.ImportedQuestionOptions.RemoveRange(question.Options);
@@ -467,6 +496,9 @@ public class ImportService
             if (string.IsNullOrWhiteSpace(q.Prompt) || !hasEnoughOptions || !hasCorrectAnswer)
                 throw new InvalidOperationException(
                     $"Can't approve a question with missing text, fewer than 2 options, or no correct answer marked (question: \"{Truncate(q.Prompt, 50)}\").");
+            if (q.RequiresManualReview)
+                throw new InvalidOperationException(
+                    $"Can't approve an interactive PBQ until an administrator clears its manual-review flag (question: \"{Truncate(q.Prompt, 50)}\").");
 
             q.ReviewStatus = ImportedQuestionReviewStatus.Approved;
             q.ReviewedByUserId = _currentUser.UserId;
@@ -534,6 +566,7 @@ public class ImportService
 
         var approvedQuestions = await _db.ImportedQuestions
             .Include(q => q.Options)
+            .Include(q => q.Images)
             .Where(q => q.QuestionBankVersionId == versionId
                      && q.ReviewStatus == ImportedQuestionReviewStatus.Approved
                      && q.PublishedQuestionId == null)
@@ -551,8 +584,12 @@ public class ImportService
                 Prompt = imported.Prompt,
                 Explanation = imported.Explanation,
                 Reference = imported.Reference,
+                QuestionType = imported.QuestionType,
                 Status = QuestionStatus.Published,
             };
+
+            if (imported.Images.Count > 0)
+                question.ImageUrl = $"/api/questions/{question.Id}/image";
 
             foreach (var opt in imported.Options.OrderBy(o => o.SortOrder))
             {
@@ -593,6 +630,17 @@ public class ImportService
         return await _fileStorage.OpenReadAsync(image.StoredFilePath, ct);
     }
 
+    public async Task<Stream> OpenPublishedQuestionImageAsync(Guid questionId, CancellationToken ct)
+    {
+        var image = await _db.ImportedQuestions
+            .Where(q => q.PublishedQuestionId == questionId)
+            .SelectMany(q => q.Images)
+            .OrderBy(i => i.SortOrder)
+            .FirstOrDefaultAsync(ct)
+            ?? throw new InvalidOperationException("Question image not found.");
+        return await _fileStorage.OpenReadAsync(image.StoredFilePath, ct);
+    }
+
     // ---------------------------------------------------------------- Mapping helpers
 
     private async Task<ImportJobDto> ToJobDtoAsync(ImportJob job, CancellationToken ct)
@@ -621,10 +669,14 @@ public class ImportService
 
     private static ImportedQuestionDto ToQuestionDto(ImportedQuestion q)
     {
+        var images = q.Images?.OrderBy(i => i.SortOrder)
+            .Select(i => new ImportJobImageDto(i.Id, i.PageNumber, i.ImageKind, i.ImportedQuestionId)).ToList()
+            ?? new List<ImportJobImageDto>();
         return new ImportedQuestionDto(
             q.Id, q.Topic, q.Subtopic, q.Difficulty.ToString(), q.Prompt, q.Explanation, q.Reference,
+            q.QuestionType, q.RequiresManualReview, q.SourcePageStart, q.SourcePageEnd,
             q.ReviewStatus.ToString(), q.ValidationIssues, q.IsDuplicate, q.DuplicateOfQuestionId, q.PublishedQuestionId,
-            q.Options.OrderBy(o => o.SortOrder).Select(o => new ImportedQuestionOptionDto(o.Id, o.Text, o.IsCorrect, o.SortOrder)).ToList());
+            q.Options.OrderBy(o => o.SortOrder).Select(o => new ImportedQuestionOptionDto(o.Id, o.Text, o.IsCorrect, o.SortOrder)).ToList(), images);
     }
 
     private static string Truncate(string value, int maxLength) =>

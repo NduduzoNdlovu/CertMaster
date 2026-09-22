@@ -314,10 +314,20 @@ namespace CertMaster.Infrastructure.Migrations
                     b.Property<Guid>("ImportJobId")
                         .HasColumnType("uuid");
 
+                    b.Property<string>("ImageKind")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<Guid?>("ImportedQuestionId")
+                        .HasColumnType("uuid");
+
                     b.Property<DateTime?>("ModifiedAtUtc")
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<int>("PageNumber")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("SortOrder")
                         .HasColumnType("integer");
 
                     b.Property<string>("StoredFilePath")
@@ -327,6 +337,8 @@ namespace CertMaster.Infrastructure.Migrations
                     b.HasKey("Id");
 
                     b.HasIndex("ImportJobId");
+
+                    b.HasIndex("ImportedQuestionId");
 
                     b.ToTable("ImportJobImages");
                 });
@@ -371,6 +383,19 @@ namespace CertMaster.Infrastructure.Migrations
 
                     b.Property<Guid>("QuestionBankVersionId")
                         .HasColumnType("uuid");
+
+                    b.Property<string>("QuestionType")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<bool>("RequiresManualReview")
+                        .HasColumnType("boolean");
+
+                    b.Property<int?>("SourcePageEnd")
+                        .HasColumnType("integer");
+
+                    b.Property<int?>("SourcePageStart")
+                        .HasColumnType("integer");
 
                     b.Property<string>("Reference")
                         .HasColumnType("text");
@@ -572,6 +597,9 @@ namespace CertMaster.Infrastructure.Migrations
                     b.Property<string>("ImageUrl")
                         .HasColumnType("text");
 
+                    b.Property<string>("InteractionJson")
+                        .HasColumnType("text");
+
                     b.Property<DateTime?>("ModifiedAtUtc")
                         .HasColumnType("timestamp with time zone");
 
@@ -581,6 +609,10 @@ namespace CertMaster.Infrastructure.Migrations
 
                     b.Property<Guid>("QuestionBankVersionId")
                         .HasColumnType("uuid");
+
+                    b.Property<string>("QuestionType")
+                        .IsRequired()
+                        .HasColumnType("text");
 
                     b.Property<string>("Reference")
                         .HasColumnType("text");
@@ -663,6 +695,9 @@ namespace CertMaster.Infrastructure.Migrations
 
                     b.Property<bool>("IsCorrect")
                         .HasColumnType("boolean");
+
+                    b.Property<string>("ImageUrl")
+                        .HasColumnType("text");
 
                     b.Property<DateTime?>("ModifiedAtUtc")
                         .HasColumnType("timestamp with time zone");
@@ -937,7 +972,14 @@ namespace CertMaster.Infrastructure.Migrations
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 
+                    b.HasOne("CertMaster.Domain.Entities.ImportedQuestion", "ImportedQuestion")
+                        .WithMany("Images")
+                        .HasForeignKey("ImportedQuestionId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
                     b.Navigation("ImportJob");
+
+                    b.Navigation("ImportedQuestion");
                 });
 
             modelBuilder.Entity("CertMaster.Domain.Entities.ImportedQuestion", b =>
@@ -965,6 +1007,8 @@ namespace CertMaster.Infrastructure.Migrations
                     b.Navigation("ImportJob");
 
                     b.Navigation("QuestionBankVersion");
+
+                    b.Navigation("Images");
                 });
 
             modelBuilder.Entity("CertMaster.Domain.Entities.ImportedQuestionOption", b =>

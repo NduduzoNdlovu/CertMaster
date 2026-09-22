@@ -107,6 +107,8 @@ export function useStartImport() {
               difficulty: "Medium",
               prompt: "Sample imported question — mock mode doesn't parse real files.",
               explanation: "This is a placeholder shown only in mock mode.",
+              questionType: "Choice",
+              requiresManualReview: false,
               reviewStatus: "PendingReview",
               validationIssues: "",
               isDuplicate: false,
@@ -114,6 +116,7 @@ export function useStartImport() {
                 { id: "o1", text: "Option A", isCorrect: true, sortOrder: 1 },
                 { id: "o2", text: "Option B", isCorrect: false, sortOrder: 2 },
               ],
+              images: [],
             },
             {
               id: `${jobId}-q2`,
@@ -121,6 +124,8 @@ export function useStartImport() {
               difficulty: "Easy",
               prompt: "A second sample question with a validation issue.",
               explanation: "",
+              questionType: "Choice",
+              requiresManualReview: false,
               reviewStatus: "PendingReview",
               validationIssues: "No correct answer could be identified.",
               isDuplicate: false,
@@ -128,6 +133,7 @@ export function useStartImport() {
                 { id: "o3", text: "Option A", isCorrect: false, sortOrder: 1 },
                 { id: "o4", text: "Option B", isCorrect: false, sortOrder: 2 },
               ],
+              images: [],
             },
           ],
           extractedImages: [],
@@ -168,6 +174,8 @@ export function useUpdateImportedQuestion() {
         prompt: question.prompt,
         explanation: question.explanation,
         reference: question.reference,
+        questionType: question.questionType,
+        requiresManualReview: question.requiresManualReview,
         options: question.options?.map((o) => ({ id: o.id, text: o.text, isCorrect: o.isCorrect })),
       });
       return data;
