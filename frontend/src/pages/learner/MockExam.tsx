@@ -1,215 +1,42 @@
-import { useEffect, useState } from "react";
-import { Flag, Clock } from "lucide-react";
-import { usePracticeQuestions, useSubmitExam } from "../../hooks/useApiData";
+import { useEffect, useMemo, useState } from "react";
+import { Clock, Flag, WifiOff } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
+import { useCompleteExam, useSaveExamAnswer, useStartExam } from "../../hooks/useApiData";
 import { Card, SectionHeading, Badge } from "../../components/ui/Primitives";
 import { Button } from "../../components/ui/Button";
-import type { ExamSubmitResult } from "../../types";
+import type { ExamSession, ExamSubmitResult } from "../../types";
 
-function formatTime(seconds: number) {
-  const m = Math.floor(seconds / 60).toString().padStart(2, "0");
-  const s = (seconds % 60).toString().padStart(2, "0");
-  return `${m}:${s}`;
-}
-
-const EXAM_DURATION_SECONDS = 90 * 60;
+const formatTime = (s: number) => `${Math.floor(s / 60).toString().padStart(2, "0")}:${(s % 60).toString().padStart(2, "0")}`;
 
 export default function MockExam() {
-  const [params] = useSearchParams();
-  const certId = params.get("cert") ?? undefined;
-  const { data: questions } = usePracticeQuestions(certId);
-  const submitExam = useSubmitExam();
+  const [params] = useSearchParams(); const certId = params.get("cert") ?? "";
+  const start = useStartExam(); const save = useSaveExamAnswer(); const complete = useCompleteExam();
+  const [session, setSession] = useState<ExamSession>(); const [current, setCurrent] = useState(0);
+  const [answers, setAnswers] = useState<Record<string, string>>({}); const [flagged, setFlagged] = useState<Set<string>>(new Set());
+  const [secondsLeft, setSecondsLeft] = useState(0); const [result, setResult] = useState<ExamSubmitResult>(); const [offline, setOffline] = useState(!navigator.onLine);
+  const storageKey = session ? `certmaster-exam-${session.attemptId}` : "";
 
-  const [started, setStarted] = useState(false);
-  const [submitted, setSubmitted] = useState(false);
-  const [current, setCurrent] = useState(0);
-  const [answers, setAnswers] = useState<Record<string, string>>({});
-  const [flagged, setFlagged] = useState<Set<string>>(new Set());
-  const [secondsLeft, setSecondsLeft] = useState(EXAM_DURATION_SECONDS);
-  const [result, setResult] = useState<ExamSubmitResult | null>(null);
-  const [submitError, setSubmitError] = useState<string | null>(null);
+  const submit = async () => { if (!session || complete.isPending || result) return; try { setResult(await complete.mutateAsync(session.attemptId)); localStorage.removeItem(storageKey); } catch { /* keep state for retry */ } };
+  useEffect(() => { const online = () => setOffline(false); const off = () => setOffline(true); addEventListener("online", online); addEventListener("offline", off); return () => { removeEventListener("online", online); removeEventListener("offline", off); }; }, []);
+  useEffect(() => { if (!session || result) return; const tick = () => { const left = Math.max(0, Math.ceil((new Date(session.expiresAtUtc).getTime() - Date.now()) / 1000)); setSecondsLeft(left); if (left === 0) void submit(); }; tick(); const id = setInterval(tick, 1000); return () => clearInterval(id); }, [session, result]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (!session) return; const saved = localStorage.getItem(storageKey); const local = saved ? JSON.parse(saved) as { answers: Record<string,string>; flagged: string[] } : undefined; setAnswers({ ...Object.fromEntries(session.questions.filter(q => q.selectedOptionId).map(q => [q.id, q.selectedOptionId!])), ...(local?.answers ?? {}) }); setFlagged(new Set([ ...session.questions.filter(q => q.wasFlaggedForReview).map(q => q.id), ...(local?.flagged ?? []) ])); }, [session, storageKey]);
+  useEffect(() => { if (session) localStorage.setItem(storageKey, JSON.stringify({ answers, flagged: [...flagged] })); }, [answers, flagged, session, storageKey]);
+  useEffect(() => { if (!session || offline) return; Object.entries(answers).forEach(([questionId, selectedOptionId]) => save.mutate({ attemptId: session.attemptId, questionId, selectedOptionId, wasFlaggedForReview: flagged.has(questionId) })); }, [offline]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  useEffect(() => {
-    if (!started || submitted) return;
-    const timer = setInterval(() => {
-      setSecondsLeft((s) => {
-        if (s <= 1) {
-          clearInterval(timer);
-          handleSubmit();
-          return 0;
-        }
-        return s - 1;
-      });
-    }, 1000);
-    return () => clearInterval(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [started, submitted]);
-
-  if (!questions) return <p className="text-sm text-text-secondary">Loading exam...</p>;
-
-  if (questions.length === 0) {
-    return (
-      <Card className="p-8 max-w-lg mx-auto text-center">
-        <p className="text-sm text-text-secondary">
-          No published questions yet for this certification. An administrator needs to import and publish a
-          question bank before a mock exam can be taken.
-        </p>
-      </Card>
-    );
-  }
-
-  const handleSubmit = () => {
-    if (submitted || submitExam.isPending) return;
-    setSubmitted(true);
-    setSubmitError(null);
-
-    submitExam.mutate(
-      {
-        certificationId: certId ?? questions[0]?.certificationId ?? "",
-        mode: "MockExam",
-        durationSeconds: EXAM_DURATION_SECONDS - secondsLeft,
-        answers: questions.map((q) => ({
-          questionId: q.id,
-          selectedOptionId: answers[q.id] ?? null,
-          wasFlaggedForReview: flagged.has(q.id),
-        })),
-      },
-      {
-        onSuccess: (data) => setResult(data),
-        onError: () => setSubmitError("Couldn't submit your exam. Your answers are still on this page — try again."),
-      }
-    );
+  const saveAnswer = (questionId: string, selectedOptionId: string | null, isFlagged: boolean) => {
+    if (selectedOptionId) setAnswers(a => ({ ...a, [questionId]: selectedOptionId }));
+    save.mutate({ attemptId: session!.attemptId, questionId, selectedOptionId, wasFlaggedForReview: isFlagged });
   };
+  const begin = async () => { if (!certId) return; try { setSession(await start.mutateAsync({ certificationId: certId, mode: "MockExam" })); } catch { /* displayed below */ } };
+  const question = useMemo(() => session?.questions[current], [session, current]);
 
-  if (!started) {
-    return (
-      <Card className="p-8 max-w-2xl mx-auto text-center">
-        <h1 className="text-xl font-bold text-text-primary mb-2">CompTIA Mock Exam Simulation</h1>
-        <p className="text-sm text-text-secondary mb-6">
-          {questions.length} questions &middot; 90 minutes &middot; Passing score 65%. Once started, the timer cannot be paused.
-        </p>
-        <Button onClick={() => setStarted(true)}>Start mock exam</Button>
-      </Card>
-    );
-  }
+  if (!session) return <Card className="p-8 max-w-2xl mx-auto text-center"><h1 className="text-xl font-bold mb-2">Mock Exam</h1><p className="text-sm text-text-secondary mb-6">Start a new exam or resume your unfinished exam. Duration, question count and pass mark come from the selected certification.</p><Button onClick={begin} disabled={!certId || start.isPending}>{start.isPending ? "Preparing..." : "Start or resume exam"}</Button>{start.isError && <p className="text-state-error mt-4">Could not start the exam. Confirm that the certification has published questions.</p>}</Card>;
+  if (result) return <Card className="p-8 max-w-2xl mx-auto text-center"><Badge tone={result.passed ? "success" : "error"}>{result.passed ? "PASS" : "FAIL"}</Badge><h1 className="text-3xl font-bold mt-4">{result.score}%</h1><p>{result.correctCount} of {result.totalQuestions} correct</p></Card>;
+  if (!question) return <p>No questions are available.</p>;
 
-  if (submitted) {
-    if (submitError) {
-      return (
-        <Card className="p-8 max-w-2xl mx-auto text-center">
-          <p className="text-sm text-state-error mb-4">{submitError}</p>
-          <Button onClick={handleSubmit}>Retry submission</Button>
-        </Card>
-      );
-    }
-
-    if (!result) {
-      return <p className="text-sm text-text-secondary text-center">Submitting your exam...</p>;
-    }
-
-    return (
-      <Card className="p-8 max-w-2xl mx-auto text-center">
-        <Badge tone={result.passed ? "success" : "error"}>{result.passed ? "PASS" : "FAIL"}</Badge>
-        <h1 className="text-3xl font-extrabold text-text-primary mt-4">{result.score}%</h1>
-        <p className="text-sm text-text-secondary mt-2">
-          {result.correctCount} of {result.totalQuestions} correct
-        </p>
-        <div className="grid grid-cols-2 gap-4 mt-6 text-left">
-          <div className="p-4 rounded-md bg-bg-alt">
-            <p className="text-xs text-text-secondary">Time used</p>
-            <p className="font-semibold text-text-primary">{formatTime(EXAM_DURATION_SECONDS - secondsLeft)}</p>
-          </div>
-          <div className="p-4 rounded-md bg-bg-alt">
-            <p className="text-xs text-text-secondary">Flagged questions</p>
-            <p className="font-semibold text-text-primary">{flagged.size}</p>
-          </div>
-        </div>
-        <Button className="mt-6" onClick={() => window.location.reload()}>Return to certifications</Button>
-      </Card>
-    );
-  }
-
-  const question = questions[current % questions.length];
-
-  return (
-    <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
-      <div className="lg:col-span-3 space-y-4">
-        <Card className="p-4 flex items-center justify-between sticky top-[82px] z-10">
-          <SectionHeading title={`Question ${current + 1} of ${questions.length}`} />
-          <div className="flex items-center gap-2 text-brand-primary font-semibold">
-            <Clock size={18} />
-            {formatTime(secondsLeft)}
-          </div>
-        </Card>
-
-        <Card className="p-6">
-          <div className="flex items-center justify-between mb-4">
-            <Badge tone="brand">{question.topic}</Badge>
-            <button
-              onClick={() =>
-                setFlagged((prev) => {
-                  const next = new Set(prev);
-                  next.has(question.id) ? next.delete(question.id) : next.add(question.id);
-                  return next;
-                })
-              }
-              className={`h-10 w-10 flex items-center justify-center rounded-md ${flagged.has(question.id) ? "text-brand-accent" : "text-text-secondary hover:bg-bg-alt"}`}
-              aria-label="Flag for review"
-            >
-              <Flag size={18} />
-            </button>
-          </div>
-          <p className="text-base font-medium text-text-primary mb-5">{question.prompt}</p>
-          <div className="space-y-3">
-            {question.options.map((opt) => (
-              <button
-                key={opt.id}
-                onClick={() => setAnswers((a) => ({ ...a, [question.id]: opt.id }))}
-                className={`w-full text-left px-4 py-3 rounded-md border text-sm min-h-[44px] transition-colors ${
-                  answers[question.id] === opt.id ? "border-brand-primary bg-red-50" : "border-border-subtle hover:bg-bg-alt"
-                }`}
-              >
-                {opt.text}
-              </button>
-            ))}
-          </div>
-        </Card>
-
-        <div className="flex justify-between">
-          <Button variant="secondary" disabled={current === 0} onClick={() => setCurrent((c) => c - 1)}>
-            Previous
-          </Button>
-          {current === questions.length - 1 ? (
-            <Button variant="danger" onClick={handleSubmit} disabled={submitExam.isPending}>
-              {submitExam.isPending ? "Submitting..." : "Submit exam"}
-            </Button>
-          ) : (
-            <Button onClick={() => setCurrent((c) => c + 1)}>Next</Button>
-          )}
-        </div>
-      </div>
-
-      <Card className="p-4 h-fit">
-        <SectionHeading title="Navigator" />
-        <div className="grid grid-cols-5 gap-2">
-          {questions.map((q, i) => {
-            const answered = Boolean(answers[q.id]);
-            const isFlagged = flagged.has(q.id);
-            return (
-              <button
-                key={q.id}
-                onClick={() => setCurrent(i)}
-                className={`h-9 w-9 rounded-md text-xs font-semibold flex items-center justify-center border
-                  ${i === current ? "border-brand-primary bg-brand-primary text-white" : answered ? "border-state-success bg-green-50 text-state-success" : "border-border-subtle text-text-secondary"}
-                  ${isFlagged ? "ring-2 ring-brand-accent" : ""}
-                `}
-              >
-                {i + 1}
-              </button>
-            );
-          })}
-        </div>
-      </Card>
-    </div>
-  );
+  return <div className="grid lg:grid-cols-4 gap-6"><div className="lg:col-span-3 space-y-4">
+    <Card className="p-4 flex justify-between sticky top-[82px] z-10"><SectionHeading title={`Question ${current + 1} of ${session.questions.length}`} /><div className="flex gap-3">{offline && <span className="text-state-error flex gap-1"><WifiOff size={18}/>Offline — answers kept locally</span>}<span className="flex gap-1 font-semibold"><Clock size={18}/>{formatTime(secondsLeft)}</span></div></Card>
+    <Card className="p-6"><div className="flex justify-between"><Badge tone="brand">{question.topic}</Badge><button onClick={() => { const next = new Set(flagged); next.has(question.id) ? next.delete(question.id) : next.add(question.id); setFlagged(next); saveAnswer(question.id, answers[question.id] ?? null, next.has(question.id)); }}><Flag className={flagged.has(question.id) ? "text-brand-accent" : "text-text-secondary"}/></button></div><p className="font-medium my-5">{question.prompt}</p><div className="space-y-3">{question.options.map(o => <button key={o.id} onClick={() => saveAnswer(question.id, o.id, flagged.has(question.id))} className={`w-full text-left p-4 rounded-md border ${answers[question.id] === o.id ? "border-brand-primary bg-red-50" : "border-border-subtle"}`}>{o.text}</button>)}</div></Card>
+    <div className="flex justify-between"><Button variant="secondary" disabled={current === 0} onClick={() => setCurrent(c => c - 1)}>Previous</Button>{current === session.questions.length - 1 ? <Button variant="danger" onClick={() => void submit()} disabled={complete.isPending}>{complete.isPending ? "Submitting..." : "Submit exam"}</Button> : <Button onClick={() => setCurrent(c => c + 1)}>Next</Button>}</div>{complete.isError && <p className="text-state-error">Submission failed. Your answers are safe; reconnect and try again.</p>}
+  </div><Card className="p-4 h-fit"><SectionHeading title="Navigator"/><div className="grid grid-cols-5 gap-2">{session.questions.map((q, i) => <button key={q.id} onClick={() => setCurrent(i)} className={`h-9 rounded border ${i === current ? "bg-brand-primary text-white" : answers[q.id] ? "bg-green-50" : ""} ${flagged.has(q.id) ? "ring-2 ring-brand-accent" : ""}`}>{i + 1}</button>)}</div></Card></div>;
 }

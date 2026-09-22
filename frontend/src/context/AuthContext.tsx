@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useMemo, useState, type ReactNode
 import { api, tokenStorage } from "../lib/api";
 import type { AuthUser } from "../types";
 
-const USE_MOCKS = import.meta.env.VITE_USE_MOCKS === "true";
+const USE_MOCKS = import.meta.env.DEV && import.meta.env.VITE_USE_MOCKS === "true";
 
 interface AuthContextValue {
   user: AuthUser | null;

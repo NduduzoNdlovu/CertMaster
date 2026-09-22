@@ -4,7 +4,7 @@ import { Card, SectionHeading } from "../../components/ui/Primitives";
 import { Button } from "../../components/ui/Button";
 import { api } from "../../lib/api";
 
-const USE_MOCKS = import.meta.env.VITE_USE_MOCKS === "true";
+const USE_MOCKS = import.meta.env.DEV && import.meta.env.VITE_USE_MOCKS === "true";
 
 const freeFeatures = ["Limited mock exams", "Limited daily practice", "Basic analytics", "Basic explanations", "Limited bookmarks"];
 const premiumFeatures = [

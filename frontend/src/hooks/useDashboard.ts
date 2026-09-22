@@ -3,7 +3,7 @@ import { api } from "../lib/api";
 import { mockDashboard } from "../lib/mockData";
 import type { DashboardSummary } from "../types";
 
-const USE_MOCKS = import.meta.env.VITE_USE_MOCKS === "true";
+const USE_MOCKS = import.meta.env.DEV && import.meta.env.VITE_USE_MOCKS === "true";
 
 export function useDashboard() {
   return useQuery<DashboardSummary>({

@@ -71,6 +71,10 @@ public class ExamAttemptConfiguration : IEntityTypeConfiguration<ExamAttempt>
     public void Configure(EntityTypeBuilder<ExamAttempt> builder)
     {
         builder.HasIndex(a => new { a.UserId, a.StartedAtUtc });
+        builder.HasIndex(a => a.UserId)
+            .HasDatabaseName("IX_ExamAttempts_UserId_OneActiveMock")
+            .IsUnique()
+            .HasFilter("\"CompletedAtUtc\" IS NULL AND \"Mode\" = 1");
         builder.HasMany(a => a.Answers)
             .WithOne(x => x.ExamAttempt!)
             .HasForeignKey(x => x.ExamAttemptId)

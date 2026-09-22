@@ -103,15 +103,24 @@ namespace CertMaster.Infrastructure.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
+                    b.Property<int>("ExamDurationMinutes")
+                        .HasColumnType("integer");
+
                     b.Property<bool>("IsActive")
                         .HasColumnType("boolean");
 
                     b.Property<DateTime?>("ModifiedAtUtc")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<int>("MockExamQuestionCount")
+                        .HasColumnType("integer");
+
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasColumnType("text");
+
+                    b.Property<int>("PassingScorePercent")
+                        .HasColumnType("integer");
 
                     b.Property<string>("Vendor")
                         .IsRequired()
@@ -206,6 +215,11 @@ namespace CertMaster.Infrastructure.Migrations
                     b.HasKey("Id");
 
                     b.HasIndex("CertificationId");
+
+                    b.HasIndex("UserId")
+                        .IsUnique()
+                        .HasDatabaseName("IX_ExamAttempts_UserId_OneActiveMock")
+                        .HasFilter("\"CompletedAtUtc\" IS NULL AND \"Mode\" = 1");
 
                     b.HasIndex("UserId", "StartedAtUtc");
 

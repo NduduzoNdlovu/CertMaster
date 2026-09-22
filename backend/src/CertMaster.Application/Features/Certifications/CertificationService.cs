@@ -12,7 +12,10 @@ public record CertificationDto(
     string Version,
     string Description,
     int TopicCount,
-    int QuestionCount);
+    int QuestionCount,
+    int ExamDurationMinutes,
+    int PassingScorePercent,
+    int MockExamQuestionCount);
 
 public class CertificationService
 {
@@ -52,7 +55,10 @@ public class CertificationService
                 c.CurrentVersion,
                 c.Description,
                 c.Topics.Count,
-                c.Questions.Count(q => q.Status == Domain.Enums.QuestionStatus.Published)))
+                c.Questions.Count(q => q.Status == Domain.Enums.QuestionStatus.Published),
+                c.ExamDurationMinutes,
+                c.PassingScorePercent,
+                c.MockExamQuestionCount))
             .ToListAsync(ct);
 
         await _cache.SetStringAsync(CacheKey, JsonSerializer.Serialize(certifications), CacheOptions, ct);

@@ -31,9 +31,13 @@ public class AdminController : ControllerBase
     }
 
     [HttpGet("users")]
-    public async Task<ActionResult> GetUsers([FromQuery] string? search, CancellationToken ct)
+    public async Task<ActionResult> GetUsers([FromQuery] string? search, [FromQuery] string? role,
+        [FromQuery] string? plan, [FromQuery] string? status, [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 25, CancellationToken ct = default)
     {
-        var query = _db.Users.AsQueryable();
+        page = Math.Max(1, page);
+        pageSize = Math.Clamp(pageSize, 1, 100);
+        var query = _db.Users.AsNoTracking().AsQueryable();
 
         if (!string.IsNullOrWhiteSpace(search))
         {
@@ -41,9 +45,16 @@ public class AdminController : ControllerBase
             query = query.Where(u => u.FullName.ToLower().Contains(term) || u.Email.ToLower().Contains(term));
         }
 
+        if (Enum.TryParse<UserRole>(role, true, out var parsedRole)) query = query.Where(u => u.Role == parsedRole);
+        if (Enum.TryParse<SubscriptionPlan>(plan, true, out var parsedPlan)) query = query.Where(u => u.Plan == parsedPlan);
+        if (string.Equals(status, "Active", StringComparison.OrdinalIgnoreCase)) query = query.Where(u => !u.IsSuspended);
+        if (string.Equals(status, "Suspended", StringComparison.OrdinalIgnoreCase)) query = query.Where(u => u.IsSuspended);
+
+        var totalCount = await query.CountAsync(ct);
+
         var users = await query
             .OrderByDescending(u => u.CreatedAtUtc)
-            .Take(200)
+            .Skip((page - 1) * pageSize).Take(pageSize)
             .Select(u => new
             {
                 u.Id,
@@ -56,7 +67,20 @@ public class AdminController : ControllerBase
             })
             .ToListAsync(ct);
 
-        return Ok(users);
+        return Ok(new { items = users, page, pageSize, totalCount, totalPages = (int)Math.Ceiling(totalCount / (double)pageSize) });
+    }
+
+    [HttpGet("users/{id:guid}")]
+    public async Task<ActionResult> GetUser(Guid id, CancellationToken ct)
+    {
+        var user = await _db.Users.AsNoTracking().Where(u => u.Id == id).Select(u => new
+        {
+            u.Id, u.FullName, u.Email, Role = u.Role.ToString(), Plan = u.Plan.ToString(), u.IsSuspended,
+            u.EmailConfirmed, u.PremiumExpiresAtUtc, u.StudyStreakDays, u.LastActivityAtUtc, u.CreatedAtUtc,
+            CompletedAttempts = u.ExamAttempts.Count(a => a.CompletedAtUtc != null),
+            AverageScore = u.ExamAttempts.Where(a => a.CompletedAtUtc != null).Select(a => (double?)a.Score).Average() ?? 0
+        }).FirstOrDefaultAsync(ct);
+        return user is null ? NotFound() : Ok(user);
     }
 
     [HttpPost("users/{id:guid}/suspend")]
@@ -77,6 +101,18 @@ public class AdminController : ControllerBase
         });
         await _db.SaveChangesAsync(ct);
 
+        return NoContent();
+    }
+
+    [HttpPost("users/{id:guid}/reactivate")]
+    public async Task<ActionResult> ReactivateUser(Guid id, CancellationToken ct)
+    {
+        var user = await _db.Users.FirstOrDefaultAsync(u => u.Id == id, ct);
+        if (user is null) return NotFound();
+        user.IsSuspended = false;
+        _db.AuditLogEntries.Add(new AuditLogEntry { ActorEmail = _currentUser.Email ?? "unknown",
+            Action = "Reactivated user account", Target = user.Email, Level = "Info" });
+        await _db.SaveChangesAsync(ct);
         return NoContent();
     }
 
@@ -145,14 +181,16 @@ public class AdminController : ControllerBase
     }
 
     [HttpGet("logs")]
-    public async Task<ActionResult> GetAuditLogs(CancellationToken ct)
+    public async Task<ActionResult> GetAuditLogs([FromQuery] string? search, [FromQuery] string? level,
+        [FromQuery] int page = 1, [FromQuery] int pageSize = 25, CancellationToken ct = default)
     {
-        var logs = await _db.AuditLogEntries
-            .OrderByDescending(l => l.CreatedAtUtc)
-            .Take(200)
-            .ToListAsync(ct);
-
-        return Ok(logs);
+        page = Math.Max(1, page); pageSize = Math.Clamp(pageSize, 1, 100);
+        var query = _db.AuditLogEntries.AsNoTracking().AsQueryable();
+        if (!string.IsNullOrWhiteSpace(search)) query = query.Where(l => l.ActorEmail.Contains(search) || l.Action.Contains(search) || l.Target.Contains(search));
+        if (!string.IsNullOrWhiteSpace(level)) query = query.Where(l => l.Level == level);
+        var totalCount = await query.CountAsync(ct);
+        var items = await query.OrderByDescending(l => l.CreatedAtUtc).Skip((page - 1) * pageSize).Take(pageSize).ToListAsync(ct);
+        return Ok(new { items, page, pageSize, totalCount, totalPages = (int)Math.Ceiling(totalCount / (double)pageSize) });
     }
 
     [HttpGet("payments")]
@@ -174,5 +212,47 @@ public class AdminController : ControllerBase
             .ToListAsync(ct);
 
         return Ok(payments);
+    }
+
+    [HttpGet("payment-summary")]
+    public async Task<ActionResult> GetPaymentSummary(CancellationToken ct)
+    {
+        var monthStart = new DateTime(DateTime.UtcNow.Year, DateTime.UtcNow.Month, 1, 0, 0, 0, DateTimeKind.Utc);
+        var paid = _db.PaymentTransactions.AsNoTracking().Where(p => p.Status == "Paid");
+        return Ok(new
+        {
+            MonthlyRevenue = await paid.Where(p => p.CreatedAtUtc >= monthStart).SumAsync(p => p.AmountZar, ct),
+            ActiveSubscriptions = await _db.Users.CountAsync(u => u.Plan != SubscriptionPlan.Free && !u.IsSuspended, ct),
+            MonthlyPlans = await _db.Users.CountAsync(u => u.Plan == SubscriptionPlan.PremiumMonthly && !u.IsSuspended, ct),
+            YearlyPlans = await _db.Users.CountAsync(u => u.Plan == SubscriptionPlan.PremiumYearly && !u.IsSuspended, ct)
+        });
+    }
+
+    [HttpGet("analytics")]
+    public async Task<ActionResult> GetAnalytics(CancellationToken ct)
+    {
+        var completed = _db.ExamAttempts.AsNoTracking().Where(a => a.CompletedAtUtc != null);
+        var accuracy = await completed.Select(a => (double?)a.Score).AverageAsync(ct) ?? 0;
+        var duration = await completed.Where(a => a.Mode == ExamMode.MockExam).Select(a => (double?)a.DurationSeconds).AverageAsync(ct) ?? 0;
+        var failedTopic = await _db.ExamAnswers.AsNoTracking().Where(a => !a.IsCorrect && a.Question != null)
+            .GroupBy(a => a.Question!.Topic).OrderByDescending(g => g.Count()).Select(g => g.Key).FirstOrDefaultAsync(ct);
+        return Ok(new { QuestionAccuracyPercent = Math.Round(accuracy, 1), AverageMockExamDurationMinutes = Math.Round(duration / 60, 1), MostFailedTopic = failedTopic ?? "No data" });
+    }
+
+    public record UpdateExamRulesRequest(int ExamDurationMinutes, int PassingScorePercent, int MockExamQuestionCount);
+
+    [HttpPut("certifications/{id:guid}/exam-rules")]
+    public async Task<ActionResult> UpdateExamRules(Guid id, UpdateExamRulesRequest request, CancellationToken ct)
+    {
+        if (request.ExamDurationMinutes is < 1 or > 480 || request.PassingScorePercent is < 1 or > 100 || request.MockExamQuestionCount is < 1 or > 500)
+            return BadRequest(new { error = "Duration must be 1-480 minutes, pass mark 1-100, and question count 1-500." });
+        var certification = await _db.Certifications.FirstOrDefaultAsync(c => c.Id == id, ct);
+        if (certification is null) return NotFound();
+        certification.ExamDurationMinutes = request.ExamDurationMinutes;
+        certification.PassingScorePercent = request.PassingScorePercent;
+        certification.MockExamQuestionCount = request.MockExamQuestionCount;
+        _db.AuditLogEntries.Add(new AuditLogEntry { ActorEmail = _currentUser.Email ?? "unknown", Action = "Updated certification exam rules", Target = certification.Code, Level = "Info" });
+        await _db.SaveChangesAsync(ct);
+        return NoContent();
     }
 }

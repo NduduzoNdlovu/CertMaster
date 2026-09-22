@@ -23,9 +23,24 @@ import type {
   Question,
   QuestionReport,
   SearchResult,
+  ExamAttempt, ExamAttemptDetail, PagedResult, AdminUser, AuditLog, Payment, ExamSession,
 } from "../types";
 
-const USE_MOCKS = import.meta.env.VITE_USE_MOCKS === "true";
+const USE_MOCKS = import.meta.env.DEV && import.meta.env.VITE_USE_MOCKS === "true";
+
+export function useMyResults() { return useQuery<ExamAttempt[]>({ queryKey: ["exam-results"], queryFn: async () => (await api.get("/exams/my-results")).data }); }
+export function useMyResult(id?: string) { return useQuery<ExamAttemptDetail>({ queryKey: ["exam-results", id], queryFn: async () => (await api.get(`/exams/my-results/${id}`)).data, enabled: Boolean(id) }); }
+export function useAdminUsers(params: { search?: string; role?: string; plan?: string; status?: string; page: number; pageSize: number }) {
+  return useQuery<PagedResult<AdminUser>>({ queryKey: ["admin", "users", params], queryFn: async () => (await api.get("/admin/users", { params })).data });
+}
+export function useSetUserSuspended() { const qc = useQueryClient(); return useMutation({ mutationFn: async ({ id, suspended }: { id: string; suspended: boolean }) => api.post(`/admin/users/${id}/${suspended ? "suspend" : "reactivate"}`), onSuccess: () => qc.invalidateQueries({ queryKey: ["admin", "users"] }) }); }
+export function useAdminLogs(page = 1) { return useQuery<PagedResult<AuditLog>>({ queryKey: ["admin", "logs", page], queryFn: async () => (await api.get("/admin/logs", { params: { page } })).data }); }
+export function useAdminPayments() { return useQuery<Payment[]>({ queryKey: ["admin", "payments"], queryFn: async () => (await api.get("/admin/payments")).data }); }
+export function usePaymentSummary() { return useQuery<{ monthlyRevenue: number; activeSubscriptions: number; monthlyPlans: number; yearlyPlans: number }>({ queryKey: ["admin", "payment-summary"], queryFn: async () => (await api.get("/admin/payment-summary")).data }); }
+export function useAdminAnalytics() { return useQuery<{ questionAccuracyPercent: number; averageMockExamDurationMinutes: number; mostFailedTopic: string }>({ queryKey: ["admin", "analytics"], queryFn: async () => (await api.get("/admin/analytics")).data }); }
+export function useStartExam() { return useMutation({ mutationFn: async (payload: { certificationId: string; mode: "Practice" | "MockExam" }) => (await api.post<ExamSession>("/exams/start", payload)).data }); }
+export function useSaveExamAnswer() { return useMutation({ mutationFn: async (p: { attemptId: string; questionId: string; selectedOptionId: string | null; wasFlaggedForReview: boolean }) => api.put(`/exams/${p.attemptId}/answers/${p.questionId}`, { selectedOptionId: p.selectedOptionId, wasFlaggedForReview: p.wasFlaggedForReview }) }); }
+export function useCompleteExam() { const qc = useQueryClient(); return useMutation({ mutationFn: async (attemptId: string) => (await api.post<ExamSubmitResult>(`/exams/${attemptId}/complete`)).data, onSuccess: () => { qc.invalidateQueries({ queryKey: ["exam-results"] }); qc.invalidateQueries({ queryKey: ["dashboard"] }); } }); }
 
 export function useCertifications() {
   return useQuery<Certification[]>({

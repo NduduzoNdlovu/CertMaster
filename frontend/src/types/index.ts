@@ -22,6 +22,9 @@ export interface Certification {
   description: string;
   topicCount: number;
   questionCount: number;
+  examDurationMinutes?: number;
+  passingScorePercent?: number;
+  mockExamQuestionCount?: number;
 }
 
 export interface Topic {
@@ -56,6 +59,7 @@ export interface Question {
 export interface ExamAttempt {
   id: string;
   certificationId: string;
+  certificationName?: string;
   mode: "Practice" | "MockExam";
   startedAt: string;
   completedAt?: string;
@@ -65,6 +69,18 @@ export interface ExamAttempt {
   totalQuestions: number;
   correctCount: number;
 }
+
+export interface ExamAnswerResult {
+  questionId: string; prompt: string; selectedOptionId?: string; selectedOption?: string;
+  correctOptionId?: string; correctOption?: string; isCorrect: boolean; wasFlaggedForReview: boolean; explanation: string;
+}
+export interface ExamAttemptDetail { attempt: ExamAttempt & { certificationName: string }; answers: ExamAnswerResult[]; }
+export interface ExamSessionQuestion { id: string; topic: string; prompt: string; options: { id: string; text: string }[]; selectedOptionId?: string; wasFlaggedForReview: boolean; }
+export interface ExamSession { attemptId: string; certificationId: string; certificationName: string; mode: "Practice" | "MockExam"; startedAtUtc: string; expiresAtUtc: string; serverTimeUtc: string; passingScorePercent: number; questions: ExamSessionQuestion[]; }
+export interface PagedResult<T> { items: T[]; page: number; pageSize: number; totalCount: number; totalPages: number; }
+export interface AdminUser { id: string; fullName: string; email: string; role: string; plan: string; isSuspended: boolean; createdAtUtc: string; }
+export interface AuditLog { id: string; actorEmail: string; action: string; target?: string; level: string; createdAtUtc: string; }
+export interface Payment { id: string; userEmail?: string; plan: string; amountZar: number; status: string; createdAtUtc: string; }
 
 export interface DashboardSummary {
   studyStreakDays: number;

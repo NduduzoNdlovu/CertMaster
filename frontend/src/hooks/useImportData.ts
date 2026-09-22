@@ -7,7 +7,7 @@ import type {
   QuestionBankVersionInfo,
 } from "../types";
 
-const USE_MOCKS = import.meta.env.VITE_USE_MOCKS === "true";
+const USE_MOCKS = import.meta.env.DEV && import.meta.env.VITE_USE_MOCKS === "true";
 
 // Mock mode gives a light, in-memory simulation of the workflow so the admin UI is
 // still navigable without a backend — it does not attempt to replicate real file

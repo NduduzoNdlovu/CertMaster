@@ -1,5 +1,6 @@
 using System.Text;
 using CertMaster.Api.Middleware;
+using CertMaster.Api.Services;
 using CertMaster.Application;
 using CertMaster.Infrastructure;
 using CertMaster.Infrastructure.Identity;
@@ -14,6 +15,7 @@ var builder = WebApplication.CreateBuilder(args);
 // ---- Services -------------------------------------------------------------
 
 builder.Services.AddControllers();
+builder.Services.AddHostedService<ExpiredExamSubmissionWorker>();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(options =>
 {

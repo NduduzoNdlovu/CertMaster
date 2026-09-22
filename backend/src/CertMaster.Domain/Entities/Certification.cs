@@ -14,6 +14,9 @@ public class Certification : BaseEntity
     public string CurrentVersion { get; set; } = string.Empty;
     public string Description { get; set; } = string.Empty;
     public bool IsActive { get; set; } = true;
+    public int ExamDurationMinutes { get; set; } = 90;
+    public int PassingScorePercent { get; set; } = 65;
+    public int MockExamQuestionCount { get; set; } = 90;
 
     public ICollection<Topic> Topics { get; set; } = new List<Topic>();
     public ICollection<Question> Questions { get; set; } = new List<Question>();

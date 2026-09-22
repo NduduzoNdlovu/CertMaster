@@ -1,0 +1,16 @@
+
+```powershell
+cd backend
+dotnet restore
+dotnet build
+cd src/CertMaster.Api
+$env:ASPNETCORE_ENVIRONMENT="Development"
+dotnet run
+```
+
+```powershell
+cd frontend
+npm install
+npm run build
+npm run dev
+```
