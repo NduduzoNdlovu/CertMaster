@@ -189,6 +189,9 @@ public class ImportService
 
         buffer.Position = 0;
         var parsedQuestions = await parser.ParseAsync(buffer, ct);
+        if (parsedQuestions.Count == 0)
+            throw new InvalidOperationException(
+                "The file contained no recognisable questions. Confirm that it contains selectable text and a supported Question/Answer layout.");
 
         // ---- Detect question boundaries / options / correct answers / explanations ----
         // (all handled inside the parser — ParsedQuestion already reflects this)

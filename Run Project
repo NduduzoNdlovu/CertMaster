@@ -14,3 +14,4 @@ npm install
 npm run build
 npm run dev
 ```
+what if we add a page for manual adding of questions of all types

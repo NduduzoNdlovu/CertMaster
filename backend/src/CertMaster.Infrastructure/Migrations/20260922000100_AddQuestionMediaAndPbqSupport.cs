@@ -4,6 +4,9 @@ using Microsoft.EntityFrameworkCore.Migrations;
 
 namespace CertMaster.Infrastructure.Migrations;
 
+[Microsoft.EntityFrameworkCore.Infrastructure.DbContext(
+    typeof(CertMaster.Infrastructure.Persistence.AppDbContext))]
+[Migration("20260922000100_AddQuestionMediaAndPbqSupport")]
 public partial class AddQuestionMediaAndPbqSupport : Migration
 {
     protected override void Up(MigrationBuilder migrationBuilder)
