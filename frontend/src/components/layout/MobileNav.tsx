@@ -1,5 +1,5 @@
 import { NavLink } from "react-router-dom";
-import { LayoutDashboard, Dumbbell, FileClock, TrendingUp, X, Bookmark, Award, Trophy, Crown, Settings, HelpCircle, Layers } from "lucide-react";
+import { LayoutDashboard, Dumbbell, FileClock, TrendingUp, X, Bookmark, Award, Trophy, Crown, Settings, HelpCircle, Layers, Bell, BarChart3 } from "lucide-react";
 import { useAuth } from "../../context/AuthContext";
 
 const bottomItems = [
@@ -36,6 +36,8 @@ const drawerExtraItems = [
   { to: "/certifications", label: "Certifications", icon: Award },
   { to: "/leaderboard", label: "Leaderboard", icon: Trophy },
   { to: "/premium", label: "Premium", icon: Crown },
+  { to: "/results", label: "My Results", icon: BarChart3 },
+  { to: "/notifications", label: "Notifications", icon: Bell },
   { to: "/settings", label: "Settings", icon: Settings },
   { to: "/help", label: "Help", icon: HelpCircle },
 ];

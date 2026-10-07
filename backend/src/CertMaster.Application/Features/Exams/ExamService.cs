@@ -22,6 +22,7 @@ public record ExamAnswerResultDto(Guid QuestionId, string Prompt, Guid? Selected
 public record ExamAttemptDetailDto(ExamAttemptSummaryDto Attempt, IReadOnlyList<ExamAnswerResultDto> Answers);
 public record StartExamRequest(Guid CertificationId, string Mode);
 public record SaveExamAnswerRequest(Guid? SelectedOptionId, bool WasFlaggedForReview);
+public record PracticeAnswerResultDto(Guid QuestionId, bool IsCorrect, Guid? CorrectOptionId, string? CorrectOption, string Explanation);
 public record ExamQuestionOptionDto(Guid Id, string Text);
 public record ExamSessionQuestionDto(Guid Id, string Topic, string Prompt, IReadOnlyList<ExamQuestionOptionDto> Options,
     Guid? SelectedOptionId, bool WasFlaggedForReview);
@@ -158,6 +159,51 @@ public class ExamService
         answer.SelectedOptionId = request.SelectedOptionId;
         answer.WasFlaggedForReview = request.WasFlaggedForReview;
         await _db.SaveChangesAsync(ct);
+    }
+
+    public async Task<PracticeAnswerResultDto> SubmitPracticeAnswerAsync(
+        Guid attemptId,
+        Guid questionId,
+        SaveExamAnswerRequest request,
+        CancellationToken ct)
+    {
+        var userId = _currentUser.UserId ?? throw new UnauthorizedAccessException();
+        var attempt = await LoadAttemptAsync(attemptId, userId, ct)
+            ?? throw new KeyNotFoundException("Practice session not found.");
+
+        if (attempt.Mode != ExamMode.Practice)
+            throw new InvalidOperationException("This attempt is not a practice session.");
+
+        if (attempt.CompletedAtUtc is not null)
+            throw new InvalidOperationException("This practice session is already complete.");
+
+        if (HasExpired(attempt))
+        {
+            await CompleteAttemptAsync(attempt, ct);
+            throw new InvalidOperationException("Practice session has expired.");
+        }
+
+        var answer = attempt.Answers.FirstOrDefault(a => a.QuestionId == questionId)
+            ?? throw new KeyNotFoundException("Question is not part of this practice session.");
+
+        if (request.SelectedOptionId is not null &&
+            answer.Question?.Options.All(o => o.Id != request.SelectedOptionId) != false)
+            throw new ArgumentException("Selected option is invalid.");
+
+        answer.SelectedOptionId = request.SelectedOptionId;
+        answer.WasFlaggedForReview = request.WasFlaggedForReview;
+        answer.IsCorrect = answer.Question?.Options.Any(o => o.Id == request.SelectedOptionId && o.IsCorrect) == true;
+
+        var correct = answer.Question?.Options.FirstOrDefault(o => o.IsCorrect);
+
+        await _db.SaveChangesAsync(ct);
+
+        return new PracticeAnswerResultDto(
+            questionId,
+            answer.IsCorrect,
+            correct?.Id,
+            correct?.Text,
+            answer.Question?.Explanation ?? string.Empty);
     }
 
     public async Task<ExamResultDto> CompleteAsync(Guid attemptId, CancellationToken ct)

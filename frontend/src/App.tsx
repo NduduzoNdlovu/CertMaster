@@ -19,6 +19,7 @@ import Leaderboard from "./pages/learner/Leaderboard";
 import Premium from "./pages/learner/Premium";
 import Settings from "./pages/learner/Settings";
 import Help from "./pages/learner/Help";
+import Notifications from "./pages/learner/Notifications";
 
 import AdminDashboard from "./pages/admin/AdminDashboard";
 import AdminUsers from "./pages/admin/Users";
@@ -60,6 +61,7 @@ export default function App() {
           <Route path="/premium" element={<Premium />} />
           <Route path="/settings" element={<Settings />} />
           <Route path="/help" element={<Help />} />
+          <Route path="/notifications" element={<Notifications />} />
         </Route>
 
         {/* Administrator routes */}

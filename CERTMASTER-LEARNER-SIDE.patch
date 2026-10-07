@@ -1,0 +1,781 @@
+--- a/backend/src/CertMaster.Application/Features/Dashboard/DashboardService.cs
++++ b/backend/src/CertMaster.Application/Features/Dashboard/DashboardService.cs
+@@ -5,7 +5,9 @@
+ 
+ public record TopicMasteryDto(string Topic, int MasteryPercent);
+ 
+-public record RecentAttemptDto(Guid Id, string Mode, DateTime StartedAtUtc, int Score, bool Passed, int TotalQuestions, int CorrectCount);
++public record RecentAttemptDto(Guid Id, string CertificationName, string Mode, DateTime StartedAtUtc, DateTime? CompletedAtUtc, int DurationSeconds, int Score, bool Passed, int TotalQuestions, int CorrectCount);
++
++public record DailyActivityDto(string Date, int Minutes);
+ 
+ public record DashboardSummaryDto(
+     int StudyStreakDays,
+@@ -16,7 +18,8 @@
+     int ExamReadinessScore,
+     List<TopicMasteryDto> WeakTopics,
+     List<TopicMasteryDto> StrongTopics,
+-    List<RecentAttemptDto> RecentAttempts);
++    List<RecentAttemptDto> RecentAttempts,
++    List<DailyActivityDto> DailyActivity);
+ 
+ public class DashboardService
+ {
+@@ -38,6 +41,7 @@
+ 
+         var attempts = await _db.ExamAttempts
+             .Where(a => a.UserId == userId && a.CompletedAtUtc != null)
++            .Include(a => a.Certification)
+             .OrderByDescending(a => a.StartedAtUtc)
+             .ToListAsync(ct);
+ 
+@@ -77,8 +81,34 @@
+             WeakTopics: masteryByTopic.OrderBy(t => t.MasteryPercent).Take(3).ToList(),
+             StrongTopics: masteryByTopic.OrderByDescending(t => t.MasteryPercent).Take(3).ToList(),
+             RecentAttempts: attempts.Take(5)
+-                .Select(a => new RecentAttemptDto(a.Id, a.Mode.ToString(), a.StartedAtUtc, a.Score, a.Passed, a.TotalQuestions, a.CorrectCount))
+-                .ToList());
++                .Select(a => new RecentAttemptDto(
++                    a.Id,
++                    a.Certification?.Name ?? "Unknown",
++                    a.Mode.ToString(),
++                    a.StartedAtUtc,
++                    a.CompletedAtUtc,
++                    a.DurationSeconds,
++                    a.Score,
++                    a.Passed,
++                    a.TotalQuestions,
++                    a.CorrectCount))
++                .ToList(),
++            DailyActivity: BuildDailyActivity(attempts));
++    }
++
++
++    private static List<DailyActivityDto> BuildDailyActivity(List<Domain.Entities.ExamAttempt> attempts)
++    {
++        var today = DateTime.UtcNow.Date;
++
++        return Enumerable.Range(0, 7)
++            .Select(offset => today.AddDays(-6 + offset))
++            .Select(date => new DailyActivityDto(
++                date.ToString("yyyy-MM-dd"),
++                attempts
++                    .Where(a => a.StartedAtUtc.Date == date)
++                    .Sum(a => a.DurationSeconds) / 60))
++            .ToList();
+     }
+ 
+     /// <summary>
+--- a/backend/src/CertMaster.Application/Features/Exams/ExamService.cs
++++ b/backend/src/CertMaster.Application/Features/Exams/ExamService.cs
+@@ -22,6 +22,7 @@
+ public record ExamAttemptDetailDto(ExamAttemptSummaryDto Attempt, IReadOnlyList<ExamAnswerResultDto> Answers);
+ public record StartExamRequest(Guid CertificationId, string Mode);
+ public record SaveExamAnswerRequest(Guid? SelectedOptionId, bool WasFlaggedForReview);
++public record PracticeAnswerResultDto(Guid QuestionId, bool IsCorrect, Guid? CorrectOptionId, string? CorrectOption, string Explanation);
+ public record ExamQuestionOptionDto(Guid Id, string Text);
+ public record ExamSessionQuestionDto(Guid Id, string Topic, string Prompt, IReadOnlyList<ExamQuestionOptionDto> Options,
+     Guid? SelectedOptionId, bool WasFlaggedForReview);
+@@ -158,6 +159,51 @@
+         answer.SelectedOptionId = request.SelectedOptionId;
+         answer.WasFlaggedForReview = request.WasFlaggedForReview;
+         await _db.SaveChangesAsync(ct);
++    }
++
++    public async Task<PracticeAnswerResultDto> SubmitPracticeAnswerAsync(
++        Guid attemptId,
++        Guid questionId,
++        SaveExamAnswerRequest request,
++        CancellationToken ct)
++    {
++        var userId = _currentUser.UserId ?? throw new UnauthorizedAccessException();
++        var attempt = await LoadAttemptAsync(attemptId, userId, ct)
++            ?? throw new KeyNotFoundException("Practice session not found.");
++
++        if (attempt.Mode != ExamMode.Practice)
++            throw new InvalidOperationException("This attempt is not a practice session.");
++
++        if (attempt.CompletedAtUtc is not null)
++            throw new InvalidOperationException("This practice session is already complete.");
++
++        if (HasExpired(attempt))
++        {
++            await CompleteAttemptAsync(attempt, ct);
++            throw new InvalidOperationException("Practice session has expired.");
++        }
++
++        var answer = attempt.Answers.FirstOrDefault(a => a.QuestionId == questionId)
++            ?? throw new KeyNotFoundException("Question is not part of this practice session.");
++
++        if (request.SelectedOptionId is not null &&
++            answer.Question?.Options.All(o => o.Id != request.SelectedOptionId) != false)
++            throw new ArgumentException("Selected option is invalid.");
++
++        answer.SelectedOptionId = request.SelectedOptionId;
++        answer.WasFlaggedForReview = request.WasFlaggedForReview;
++        answer.IsCorrect = answer.Question?.Options.Any(o => o.Id == request.SelectedOptionId && o.IsCorrect) == true;
++
++        var correct = answer.Question?.Options.FirstOrDefault(o => o.IsCorrect);
++
++        await _db.SaveChangesAsync(ct);
++
++        return new PracticeAnswerResultDto(
++            questionId,
++            answer.IsCorrect,
++            correct?.Id,
++            correct?.Text,
++            answer.Question?.Explanation ?? string.Empty);
+     }
+ 
+     public async Task<ExamResultDto> CompleteAsync(Guid attemptId, CancellationToken ct)
+--- a/backend/src/CertMaster.Api/Controllers/ExamsController.cs
++++ b/backend/src/CertMaster.Api/Controllers/ExamsController.cs
+@@ -37,6 +37,16 @@
+     public async Task<ActionResult> SaveAnswer(Guid attemptId, Guid questionId, SaveExamAnswerRequest request, CancellationToken ct)
+     { await _examService.SaveAnswerAsync(attemptId, questionId, request, ct); return NoContent(); }
+ 
++    [HttpPost("{attemptId:guid}/practice-answers/{questionId:guid}")]
++    public async Task<ActionResult<PracticeAnswerResultDto>> SubmitPracticeAnswer(
++        Guid attemptId,
++        Guid questionId,
++        SaveExamAnswerRequest request,
++        CancellationToken ct)
++    {
++        return Ok(await _examService.SubmitPracticeAnswerAsync(attemptId, questionId, request, ct));
++    }
++
+     [HttpPost("{attemptId:guid}/complete")]
+     public async Task<ActionResult<ExamResultDto>> Complete(Guid attemptId, CancellationToken ct) => Ok(await _examService.CompleteAsync(attemptId, ct));
+ 
+--- a/backend/src/CertMaster.Application/Features/Questions/QuestionService.cs
++++ b/backend/src/CertMaster.Application/Features/Questions/QuestionService.cs
+@@ -4,7 +4,7 @@
+ 
+ namespace CertMaster.Application.Features.Questions;
+ 
+-public record QuestionOptionDto(Guid Id, string Text, bool IsCorrect);
++public record QuestionOptionDto(Guid Id, string Text);
+ 
+ public record QuestionDto(
+     Guid Id,
+@@ -53,7 +53,7 @@
+                 q.Reference,
+                 q.ImageUrl,
+                 q.Options.OrderBy(o => o.SortOrder)
+-                    .Select(o => new QuestionOptionDto(o.Id, o.Text, o.IsCorrect))
++                    .Select(o => new QuestionOptionDto(o.Id, o.Text))
+                     .ToList()))
+             .ToListAsync(ct);
+     }
+--- a/frontend/src/hooks/useApiData.ts
++++ b/frontend/src/hooks/useApiData.ts
+@@ -40,6 +40,21 @@
+ export function useAdminAnalytics() { return useQuery<{ questionAccuracyPercent: number; averageMockExamDurationMinutes: number; mostFailedTopic: string }>({ queryKey: ["admin", "analytics"], queryFn: async () => (await api.get("/admin/analytics")).data }); }
+ export function useStartExam() { return useMutation({ mutationFn: async (payload: { certificationId: string; mode: "Practice" | "MockExam" }) => (await api.post<ExamSession>("/exams/start", payload)).data }); }
+ export function useSaveExamAnswer() { return useMutation({ mutationFn: async (p: { attemptId: string; questionId: string; selectedOptionId: string | null; wasFlaggedForReview: boolean }) => api.put(`/exams/${p.attemptId}/answers/${p.questionId}`, { selectedOptionId: p.selectedOptionId, wasFlaggedForReview: p.wasFlaggedForReview }) }); }
++export function useSubmitPracticeAnswer() {
++  return useMutation({
++    mutationFn: async (p: { attemptId: string; questionId: string; selectedOptionId: string | null; wasFlaggedForReview: boolean }) =>
++      (await api.post(`/exams/${p.attemptId}/practice-answers/${p.questionId}`, {
++        selectedOptionId: p.selectedOptionId,
++        wasFlaggedForReview: p.wasFlaggedForReview,
++      })).data as {
++        questionId: string;
++        isCorrect: boolean;
++        correctOptionId?: string;
++        correctOption?: string;
++        explanation: string;
++      },
++  });
++}
+ export function useCompleteExam() { const qc = useQueryClient(); return useMutation({ mutationFn: async (attemptId: string) => (await api.post<ExamSubmitResult>(`/exams/${attemptId}/complete`)).data, onSuccess: () => { qc.invalidateQueries({ queryKey: ["exam-results"] }); qc.invalidateQueries({ queryKey: ["dashboard"] }); } }); }
+ 
+ export function useCertifications() {
+@@ -108,6 +123,17 @@
+     mutationFn: async (id: string) => {
+       if (USE_MOCKS) return;
+       await api.post(`/notifications/${id}/read`);
++    },
++    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["notifications"] }),
++  });
++}
++
++export function useMarkAllNotificationsRead() {
++  const queryClient = useQueryClient();
++  return useMutation({
++    mutationFn: async () => {
++      if (USE_MOCKS) return;
++      await api.post("/notifications/read-all");
+     },
+     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["notifications"] }),
+   });
+--- a/frontend/src/pages/learner/Practice.tsx
++++ b/frontend/src/pages/learner/Practice.tsx
+@@ -1,79 +1,118 @@
+-import { useState } from "react";
++import { useMemo, useState } from "react";
+ import { useSearchParams } from "react-router-dom";
+ import { Bookmark, Flag, Shuffle, CheckCircle2, XCircle } from "lucide-react";
+-import { usePracticeQuestions, useBookmarkedIds, useToggleBookmark, useReportQuestion, useSubmitExam } from "../../hooks/useApiData";
++import {
++  useCertifications,
++  useBookmarkedIds,
++  useToggleBookmark,
++  useReportQuestion,
++  useStartExam,
++  useSubmitPracticeAnswer,
++  useCompleteExam,
++} from "../../hooks/useApiData";
+ import { Card, SectionHeading, Badge } from "../../components/ui/Primitives";
+ import { Button } from "../../components/ui/Button";
++import type { ExamSession, ExamSubmitResult } from "../../types";
+ 
+ export default function Practice() {
+   const [params] = useSearchParams();
+-  const certId = params.get("cert") ?? undefined;
+-  const { data: questions, isLoading } = usePracticeQuestions(certId);
++  const initialCertId = params.get("cert") ?? "";
++  const { data: certifications = [] } = useCertifications();
++  const [certId, setCertId] = useState(initialCertId);
++  const [session, setSession] = useState<ExamSession>();
++  const [current, setCurrent] = useState(0);
++  const [result, setResult] = useState<ExamSubmitResult>();
++  const [selectedOption, setSelectedOption] = useState<string | null>(null);
++  const [feedback, setFeedback] = useState<{ isCorrect: boolean; correctOption?: string; explanation: string } | null>(null);
++  const [flagged, setFlagged] = useState<Set<string>>(new Set());
++  const [reportOpen, setReportOpen] = useState(false);
++  const [reportReason, setReportReason] = useState("");
++  const [reportSent, setReportSent] = useState(false);
++
+   const { data: bookmarkedIds } = useBookmarkedIds();
+   const toggleBookmark = useToggleBookmark();
+   const reportQuestion = useReportQuestion();
+-  const submitExam = useSubmitExam();
+-
+-  const [index, setIndex] = useState(0);
+-  const [selectedOption, setSelectedOption] = useState<string | null>(null);
+-  const [revealed, setRevealed] = useState(false);
+-  const [difficulty, setDifficulty] = useState<string>("All");
+-  const [reportOpen, setReportOpen] = useState(false);
+-  const [reportReason, setReportReason] = useState("");
+-  const [reportSent, setReportSent] = useState(false);
+-  const [questionStartedAt, setQuestionStartedAt] = useState(() => Date.now());
+-
+-  if (isLoading || !questions) {
+-    return <p className="text-sm text-text-secondary">Loading practice questions...</p>;
+-  }
+-
+-  const filtered = difficulty === "All" ? questions : questions.filter((q) => q.difficulty === difficulty);
+-
+-  if (filtered.length === 0) {
+-    return (
+-      <Card className="p-8 max-w-lg mx-auto text-center">
+-        <p className="text-sm text-text-secondary">
+-          {questions.length === 0
+-            ? "No published questions yet for this certification. An administrator needs to import and publish a question bank first."
+-            : "No questions match this difficulty filter yet — try a different one."}
+-        </p>
+-      </Card>
+-    );
+-  }
+-
+-  const question = filtered[index % filtered.length];
+-  const isBookmarked = question ? bookmarkedIds?.has(question.id) ?? false : false;
+-
+-  const isCorrect = (optionId: string) => question.options.find((o) => o.id === optionId)?.isCorrect;
+-
+-  const handleSelect = (optionId: string) => {
+-    if (revealed || !question) return;
++  const start = useStartExam();
++  const submitAnswer = useSubmitPracticeAnswer();
++  const complete = useCompleteExam();
++
++  const question = useMemo(() => session?.questions[current], [session, current]);
++  const selectedCertification = certifications.find((c) => c.id === certId);
++
++  const begin = async () => {
++    if (!certId) return;
++    try {
++      const next = await start.mutateAsync({ certificationId: certId, mode: "Practice" });
++      setSession(next);
++      setCurrent(0);
++      setResult(undefined);
++      setSelectedOption(next.questions[0]?.selectedOptionId ?? null);
++      setFeedback(null);
++      setFlagged(new Set(next.questions.filter(q => q.wasFlaggedForReview).map(q => q.id)));
++    } catch {
++      // Error is displayed below.
++    }
++  };
++
++  const selectAnswer = async (optionId: string) => {
++    if (!session || !question || feedback || submitAnswer.isPending) return;
+     setSelectedOption(optionId);
+-    setRevealed(true);
+-
+-    submitExam.mutate({
+-      certificationId: question.certificationId,
+-      mode: "Practice",
+-      durationSeconds: Math.max(1, Math.round((Date.now() - questionStartedAt) / 1000)),
+-      answers: [{ questionId: question.id, selectedOptionId: optionId, wasFlaggedForReview: false }],
+-    });
++
++    try {
++      const response = await submitAnswer.mutateAsync({
++        attemptId: session.attemptId,
++        questionId: question.id,
++        selectedOptionId: optionId,
++        wasFlaggedForReview: flagged.has(question.id),
++      });
++      setFeedback(response);
++    } catch {
++      setSelectedOption(null);
++    }
++  };
++
++  const toggleFlag = () => {
++    if (!question || !session) return;
++    const next = new Set(flagged);
++    if (next.has(question.id)) next.delete(question.id);
++    else next.add(question.id);
++    setFlagged(next);
++    if (selectedOption) {
++      void submitAnswer.mutateAsync({
++        attemptId: session.attemptId,
++        questionId: question.id,
++        selectedOptionId: selectedOption,
++        wasFlaggedForReview: next.has(question.id),
++      });
++    }
+   };
+ 
+   const nextQuestion = () => {
+-    setIndex((i) => (i + 1) % filtered.length);
+-    setSelectedOption(null);
+-    setRevealed(false);
++    if (!session || current >= session.questions.length - 1) return;
++    const nextIndex = current + 1;
++    const nextQuestion = session.questions[nextIndex];
++    setCurrent(nextIndex);
++    setSelectedOption(nextQuestion.selectedOptionId ?? null);
++    setFeedback(null);
+     setReportOpen(false);
+     setReportSent(false);
+     setReportReason("");
+-    setQuestionStartedAt(Date.now());
++  };
++
++  const finish = async () => {
++    if (!session || complete.isPending) return;
++    try {
++      setResult(await complete.mutateAsync(session.attemptId));
++    } catch {
++      // Keep the session visible so the learner can retry.
++    }
+   };
+ 
+   const shuffle = () => {
+-    setIndex(Math.floor(Math.random() * filtered.length));
+-    setSelectedOption(null);
+-    setRevealed(false);
+-    setQuestionStartedAt(Date.now());
++    if (!session) return;
++    setCurrent(Math.floor(Math.random() * session.questions.length));
++    setFeedback(null);
++    setSelectedOption(session.questions[current]?.selectedOptionId ?? null);
+   };
+ 
+   const handleReportSubmit = () => {
+@@ -84,48 +123,77 @@
+     );
+   };
+ 
++  if (!session) {
++    return (
++      <div className="space-y-6">
++        <SectionHeading title="Practice" description="Work through a focused set of questions with instant feedback." />
++        <Card className="p-6 max-w-2xl">
++          <label className="block text-sm font-medium text-text-primary mb-2">Certification</label>
++          <select
++            value={certId}
++            onChange={(e) => setCertId(e.target.value)}
++            className="w-full h-11 px-3 rounded-md border border-border-subtle bg-white text-sm"
++          >
++            <option value="">Choose a certification</option>
++            {certifications.map(cert => <option key={cert.id} value={cert.id}>{cert.name} ({cert.code})</option>)}
++          </select>
++          {selectedCertification && (
++            <p className="text-sm text-text-secondary mt-3">
++              You will receive up to 20 published questions from {selectedCertification.name}. Your progress is saved while the session is active.
++            </p>
++          )}
++          <Button className="mt-5" onClick={begin} disabled={!certId || start.isPending}>
++            {start.isPending ? "Preparing..." : "Start practice"}
++          </Button>
++          {start.isError && <p className="text-sm text-state-error mt-3">Could not start practice. Make sure this certification has published questions.</p>}
++        </Card>
++      </div>
++    );
++  }
++
++  if (result) {
++    return (
++      <Card className="p-8 max-w-2xl mx-auto text-center">
++        <Badge tone={result.passed ? "success" : "warning"}>Practice complete</Badge>
++        <h1 className="text-3xl font-bold mt-4">{result.score}%</h1>
++        <p className="text-text-secondary mt-1">{result.correctCount} of {result.totalQuestions} correct</p>
++        <Button className="mt-6" onClick={() => { setSession(undefined); setResult(undefined); }}>
++          Start another practice session
++        </Button>
++      </Card>
++    );
++  }
++
++  if (!question) return <p className="text-sm text-state-error">This practice session has no questions.</p>;
++
++  const isBookmarked = bookmarkedIds?.has(question.id) ?? false;
++  const isLast = current === session.questions.length - 1;
++
+   return (
+     <div className="space-y-6">
+       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+-        <SectionHeading title="Practice mode" description="Unlimited attempts with instant feedback and explanations" />
+-        <div className="flex items-center gap-2">
+-          <select
+-            value={difficulty}
+-            onChange={(e) => { setDifficulty(e.target.value); setIndex(0); setRevealed(false); setSelectedOption(null); }}
+-            className="h-11 px-3 rounded-md border border-border-subtle bg-white text-sm"
+-          >
+-            <option>All</option>
+-            <option>Easy</option>
+-            <option>Medium</option>
+-            <option>Hard</option>
+-          </select>
+-          <Button variant="secondary" size="sm" onClick={shuffle}>
+-            <Shuffle size={16} /> Shuffle
+-          </Button>
+-        </div>
++        <SectionHeading title={`Practice — ${session.certificationName}`} description={`Question ${current + 1} of ${session.questions.length}`} />
++        <Button variant="secondary" size="sm" onClick={shuffle}><Shuffle size={16} /> Shuffle</Button>
+       </div>
+ 
+       <Card className="p-6">
+         <div className="flex items-center justify-between mb-4">
+           <div className="flex items-center gap-2">
+-            <Badge tone="brand">{question?.topic}</Badge>
+-            <Badge tone={question?.difficulty === "Hard" ? "error" : question?.difficulty === "Medium" ? "warning" : "success"}>
+-              {question?.difficulty}
+-            </Badge>
++            <Badge tone="brand">{question.topic}</Badge>
++            <Badge>Practice</Badge>
+           </div>
+           <div className="flex items-center gap-1">
++            <button onClick={toggleFlag} className={`h-10 w-10 flex items-center justify-center rounded-md hover:bg-bg-alt ${flagged.has(question.id) ? "text-brand-accent" : "text-text-secondary"}`} aria-label="Flag question">
++              <Flag size={18} />
++            </button>
+             <button
+-              onClick={() => question && toggleBookmark.mutate(question.id)}
+-              className={`h-10 w-10 flex items-center justify-center rounded-md hover:bg-bg-alt ${isBookmarked ? "text-brand-primary" : "text-text-secondary hover:text-brand-primary"}`}
++              onClick={() => toggleBookmark.mutate(question.id)}
++              className={`h-10 w-10 flex items-center justify-center rounded-md hover:bg-bg-alt ${isBookmarked ? "text-brand-primary" : "text-text-secondary"}`}
+               aria-label="Bookmark question"
+             >
+               <Bookmark size={18} className={isBookmarked ? "fill-brand-primary" : ""} />
+             </button>
+-            <button
+-              onClick={() => setReportOpen((v) => !v)}
+-              className="h-10 w-10 flex items-center justify-center rounded-md text-text-secondary hover:bg-bg-alt hover:text-state-error"
+-              aria-label="Report question"
+-            >
++            <button onClick={() => setReportOpen(v => !v)} className="h-10 w-10 flex items-center justify-center rounded-md text-text-secondary hover:bg-bg-alt hover:text-state-error" aria-label="Report question">
+               <Flag size={18} />
+             </button>
+           </div>
+@@ -138,16 +206,8 @@
+             ) : (
+               <>
+                 <label className="block text-sm font-medium text-text-primary mb-1.5">What's wrong with this question?</label>
+-                <textarea
+-                  value={reportReason}
+-                  onChange={(e) => setReportReason(e.target.value)}
+-                  rows={2}
+-                  placeholder="e.g. the marked correct answer looks wrong, a typo, an outdated reference..."
+-                  className="w-full px-3 py-2 rounded-md border border-border-subtle bg-white text-sm mb-2"
+-                />
+-                <Button size="sm" onClick={handleReportSubmit} disabled={reportQuestion.isPending}>
+-                  {reportQuestion.isPending ? "Sending..." : "Submit report"}
+-                </Button>
++                <textarea value={reportReason} onChange={e => setReportReason(e.target.value)} rows={2} className="w-full px-3 py-2 rounded-md border border-border-subtle bg-white text-sm mb-2" />
++                <Button size="sm" onClick={handleReportSubmit} disabled={reportQuestion.isPending}>{reportQuestion.isPending ? "Sending..." : "Submit report"}</Button>
+               </>
+             )}
+           </div>
+@@ -156,38 +216,51 @@
+         <p className="text-base font-medium text-text-primary mb-5">{question.prompt}</p>
+ 
+         <div className="space-y-3">
+-          {question.options.map((opt) => {
+-            const showCorrect = revealed && opt.isCorrect;
+-            const showIncorrect = revealed && selectedOption === opt.id && !opt.isCorrect;
++          {question.options.map(opt => {
++            const correct = feedback?.isCorrect && selectedOption === opt.id;
++            const selectedWrong = feedback && selectedOption === opt.id && !feedback.isCorrect;
+             return (
+               <button
+                 key={opt.id}
+-                onClick={() => handleSelect(opt.id)}
+-                className={`w-full text-left px-4 py-3 rounded-md border text-sm flex items-center justify-between transition-colors min-h-[44px]
+-                  ${showCorrect ? "border-state-success bg-green-50" : showIncorrect ? "border-state-error bg-red-50" : "border-border-subtle hover:bg-bg-alt"}
+-                `}
++                onClick={() => void selectAnswer(opt.id)}
++                disabled={Boolean(feedback) || submitAnswer.isPending}
++                className={`w-full text-left px-4 py-3 rounded-md border text-sm flex items-center justify-between min-h-[44px] ${
++                  correct ? "border-state-success bg-green-50" :
++                  selectedWrong ? "border-state-error bg-red-50" :
++                  "border-border-subtle hover:bg-bg-alt"
++                }`}
+               >
+-                <span className="text-text-primary">{opt.text}</span>
+-                {showCorrect && <CheckCircle2 size={18} className="text-state-success shrink-0" />}
+-                {showIncorrect && <XCircle size={18} className="text-state-error shrink-0" />}
++                <span>{opt.text}</span>
++                {correct && <CheckCircle2 size={18} className="text-state-success" />}
++                {selectedWrong && <XCircle size={18} className="text-state-error" />}
+               </button>
+             );
+           })}
+         </div>
+ 
+-        {revealed && (
++        {feedback && (
+           <div className="mt-5 p-4 rounded-md bg-bg-alt border border-border-subtle">
+-            <p className="text-sm font-semibold text-text-primary mb-1">
+-              {selectedOption && isCorrect(selectedOption) ? "Correct!" : "Not quite."}
+-            </p>
+-            <p className="text-sm text-text-secondary">{question.explanation}</p>
+-            {question.reference && <p className="text-xs text-text-secondary mt-2">Reference: {question.reference}</p>}
++            <p className="text-sm font-semibold">{feedback.isCorrect ? "Correct!" : `Not quite. Correct answer: ${feedback.correctOption ?? "See explanation."}`}</p>
++            <p className="text-sm text-text-secondary mt-1">{feedback.explanation}</p>
+           </div>
+         )}
+ 
+-        <div className="flex justify-end mt-5">
+-          <Button onClick={nextQuestion} disabled={!revealed}>Next question</Button>
++        <div className="flex justify-between mt-5">
++          <Button variant="secondary" disabled={current === 0} onClick={() => {
++            const i = current - 1;
++            setCurrent(i);
++            setSelectedOption(session.questions[i]?.selectedOptionId ?? null);
++            setFeedback(null);
++          }}>Previous</Button>
++          {isLast ? (
++            <Button onClick={() => void finish()} disabled={!feedback || complete.isPending}>
++              {complete.isPending ? "Finishing..." : "Finish practice"}
++            </Button>
++          ) : (
++            <Button onClick={nextQuestion} disabled={!feedback}>Next question</Button>
++          )}
+         </div>
++        {complete.isError && <p className="text-sm text-state-error mt-3">Could not save the result. Your answers are still saved; please try again.</p>}
+       </Card>
+     </div>
+   );
+--- a/frontend/src/pages/learner/Notifications.tsx
++++ b/frontend/src/pages/learner/Notifications.tsx
+@@ -0,0 +1,54 @@
++import { CheckCheck, Bell } from "lucide-react";
++import { useNotifications, useMarkNotificationRead, useMarkAllNotificationsRead } from "../../hooks/useApiData";
++import { Card, SectionHeading } from "../../components/ui/Primitives";
++import { Button } from "../../components/ui/Button";
++
++export default function Notifications() {
++  const { data = [], isLoading } = useNotifications();
++  const markRead = useMarkNotificationRead();
++  const markAllRead = useMarkAllNotificationsRead();
++  const unread = data.filter(n => !n.isRead).length;
++
++  return (
++    <div className="space-y-6">
++      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
++        <SectionHeading title="Notifications" description="Updates about your learning, exams and account." />
++        <Button variant="secondary" size="sm" onClick={() => markAllRead.mutate()} disabled={!unread || markAllRead.isPending}>
++          <CheckCheck size={16} /> {markAllRead.isPending ? "Marking..." : "Mark all as read"}
++        </Button>
++      </div>
++
++      <Card className="p-0 overflow-hidden">
++        {isLoading && <p className="p-6 text-sm text-text-secondary">Loading notifications...</p>}
++        {!isLoading && data.length === 0 && (
++          <div className="p-10 text-center">
++            <Bell size={30} className="mx-auto mb-3 text-text-secondary" />
++            <p className="text-sm text-text-secondary">You're all caught up.</p>
++          </div>
++        )}
++        {data.map(notification => (
++          <button
++            key={notification.id}
++            onClick={() => !notification.isRead && markRead.mutate(notification.id)}
++            className={`w-full text-left p-5 border-b border-border-subtle last:border-0 hover:bg-bg-alt ${
++              !notification.isRead ? "bg-bg-alt/60" : ""
++            }`}
++          >
++            <div className="flex items-start gap-3">
++              <span className={`mt-1.5 h-2 w-2 rounded-full shrink-0 ${notification.isRead ? "bg-border-subtle" : "bg-brand-accent"}`} />
++              <div className="min-w-0 flex-1">
++                <div className="flex items-center justify-between gap-3">
++                  <p className="font-semibold text-text-primary">{notification.title}</p>
++                  <time className="text-xs text-text-secondary shrink-0">
++                    {new Date(notification.createdAtUtc).toLocaleString()}
++                  </time>
++                </div>
++                <p className="text-sm text-text-secondary mt-1">{notification.body}</p>
++              </div>
++            </div>
++          </button>
++        ))}
++      </Card>
++    </div>
++  );
++}
+--- a/frontend/src/App.tsx
++++ b/frontend/src/App.tsx
+@@ -19,6 +19,7 @@
+ import Premium from "./pages/learner/Premium";
+ import Settings from "./pages/learner/Settings";
+ import Help from "./pages/learner/Help";
++import Notifications from "./pages/learner/Notifications";
+ 
+ import AdminDashboard from "./pages/admin/AdminDashboard";
+ import AdminUsers from "./pages/admin/Users";
+@@ -60,6 +61,7 @@
+           <Route path="/premium" element={<Premium />} />
+           <Route path="/settings" element={<Settings />} />
+           <Route path="/help" element={<Help />} />
++          <Route path="/notifications" element={<Notifications />} />
+         </Route>
+ 
+         {/* Administrator routes */}
+--- a/frontend/src/components/layout/Header.tsx
++++ b/frontend/src/components/layout/Header.tsx
+@@ -2,7 +2,7 @@
+ import { Bell, Menu, MessageSquare, Search, Settings, LogOut, GraduationCap, FileQuestion, Award, BookOpen } from "lucide-react";
+ import { useAuth } from "../../context/AuthContext";
+ import { useNavigate } from "react-router-dom";
+-import { useNotifications, useMarkNotificationRead, useSearch } from "../../hooks/useApiData";
++import { useNotifications, useMarkNotificationRead, useMarkAllNotificationsRead, useSearch } from "../../hooks/useApiData";
+ 
+ export function Header({ onMenuClick }: { onMenuClick: () => void }) {
+   const { user, logout } = useAuth();
+@@ -14,6 +14,7 @@
+ 
+   const { data: notifications } = useNotifications();
+   const markRead = useMarkNotificationRead();
++  const markAllRead = useMarkAllNotificationsRead();
+   const { data: searchResults, isFetching: isSearching } = useSearch(searchTerm);
+   const unreadCount = notifications?.filter((n) => !n.isRead).length ?? 0;
+ 
+@@ -106,6 +107,7 @@
+               <div className="px-4 py-2 flex items-center justify-between border-b border-border-subtle">
+                 <span className="text-sm font-semibold text-text-primary">Notifications</span>
+                 {unreadCount > 0 && <span className="text-xs text-brand-primary font-medium">{unreadCount} new</span>}
++                <button onMouseDown={() => markAllRead.mutate()} className="text-xs text-text-secondary hover:text-brand-primary" disabled={!unreadCount}>Mark all read</button>
+               </div>
+               {notifications?.length === 0 && (
+                 <p className="px-4 py-4 text-sm text-text-secondary">You're all caught up.</p>
+--- a/frontend/src/components/layout/Sidebar.tsx
++++ b/frontend/src/components/layout/Sidebar.tsx
+@@ -11,6 +11,7 @@
+   Crown,
+   Layers,
+   Settings,
++  Bell,
+   HelpCircle,
+   ChevronsLeft,
+   ChevronsRight,
+@@ -34,6 +35,7 @@
+   { to: "/certifications", label: "Certifications", icon: Award },
+   { to: "/leaderboard", label: "Leaderboard", icon: Trophy },
+   { to: "/premium", label: "Premium", icon: Crown },
++  { to: "/notifications", label: "Notifications", icon: Bell },
+ ];
+ 
+ const learnerFooterNav = [
+--- a/frontend/src/components/layout/MobileNav.tsx
++++ b/frontend/src/components/layout/MobileNav.tsx
+@@ -1,5 +1,5 @@
+ import { NavLink } from "react-router-dom";
+-import { LayoutDashboard, Dumbbell, FileClock, TrendingUp, X, Bookmark, Award, Trophy, Crown, Settings, HelpCircle, Layers } from "lucide-react";
++import { LayoutDashboard, Dumbbell, FileClock, TrendingUp, X, Bookmark, Award, Trophy, Crown, Settings, HelpCircle, Layers, Bell, BarChart3 } from "lucide-react";
+ import { useAuth } from "../../context/AuthContext";
+ 
+ const bottomItems = [
+@@ -36,6 +36,8 @@
+   { to: "/certifications", label: "Certifications", icon: Award },
+   { to: "/leaderboard", label: "Leaderboard", icon: Trophy },
+   { to: "/premium", label: "Premium", icon: Crown },
++  { to: "/results", label: "My Results", icon: BarChart3 },
++  { to: "/notifications", label: "Notifications", icon: Bell },
+   { to: "/settings", label: "Settings", icon: Settings },
+   { to: "/help", label: "Help", icon: HelpCircle },
+ ];
+--- a/frontend/src/types/index.ts
++++ b/frontend/src/types/index.ts
+@@ -39,7 +39,7 @@
+ export interface QuestionOption {
+   id: string;
+   text: string;
+-  isCorrect: boolean;
++  isCorrect?: boolean;
+ }
+ 
+ export interface Question {
+@@ -224,33 +224,33 @@
+   sortOrder: number;
+ }
+ 
+-export interface ImportedQuestion {
++export interface ImportedQuestion {
+   id: string;
+   topic: string;
+   subtopic?: string;
+   difficulty: string;
+   prompt: string;
+   explanation: string;
+-  reference?: string;
+-  questionType: "Choice" | "MultipleResponse" | "Simulation" | string;
+-  requiresManualReview: boolean;
+-  sourcePageStart?: number;
+-  sourcePageEnd?: number;
++  reference?: string;
++  questionType: "Choice" | "MultipleResponse" | "Simulation" | string;
++  requiresManualReview: boolean;
++  sourcePageStart?: number;
++  sourcePageEnd?: number;
+   reviewStatus: ImportedQuestionReviewStatus;
+   validationIssues: string;
+   isDuplicate: boolean;
+   duplicateOfQuestionId?: string;
+   publishedQuestionId?: string;
+-  options: ImportedQuestionOption[];
+-  images: ImportJobImageInfo[];
+-}
+-
+-export interface ImportJobImageInfo {
+-  id: string;
+-  pageNumber: number;
+-  imageKind: string;
+-  importedQuestionId?: string;
+-}
++  options: ImportedQuestionOption[];
++  images: ImportJobImageInfo[];
++}
++
++export interface ImportJobImageInfo {
++  id: string;
++  pageNumber: number;
++  imageKind: string;
++  importedQuestionId?: string;
++}
+ 
+ export interface ImportJobDetail {
+   job: ImportJob;

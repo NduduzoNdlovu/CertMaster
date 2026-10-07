@@ -40,6 +40,21 @@ export function usePaymentSummary() { return useQuery<{ monthlyRevenue: number; 
 export function useAdminAnalytics() { return useQuery<{ questionAccuracyPercent: number; averageMockExamDurationMinutes: number; mostFailedTopic: string }>({ queryKey: ["admin", "analytics"], queryFn: async () => (await api.get("/admin/analytics")).data }); }
 export function useStartExam() { return useMutation({ mutationFn: async (payload: { certificationId: string; mode: "Practice" | "MockExam" }) => (await api.post<ExamSession>("/exams/start", payload)).data }); }
 export function useSaveExamAnswer() { return useMutation({ mutationFn: async (p: { attemptId: string; questionId: string; selectedOptionId: string | null; wasFlaggedForReview: boolean }) => api.put(`/exams/${p.attemptId}/answers/${p.questionId}`, { selectedOptionId: p.selectedOptionId, wasFlaggedForReview: p.wasFlaggedForReview }) }); }
+export function useSubmitPracticeAnswer() {
+  return useMutation({
+    mutationFn: async (p: { attemptId: string; questionId: string; selectedOptionId: string | null; wasFlaggedForReview: boolean }) =>
+      (await api.post(`/exams/${p.attemptId}/practice-answers/${p.questionId}`, {
+        selectedOptionId: p.selectedOptionId,
+        wasFlaggedForReview: p.wasFlaggedForReview,
+      })).data as {
+        questionId: string;
+        isCorrect: boolean;
+        correctOptionId?: string;
+        correctOption?: string;
+        explanation: string;
+      },
+  });
+}
 export function useCompleteExam() { const qc = useQueryClient(); return useMutation({ mutationFn: async (attemptId: string) => (await api.post<ExamSubmitResult>(`/exams/${attemptId}/complete`)).data, onSuccess: () => { qc.invalidateQueries({ queryKey: ["exam-results"] }); qc.invalidateQueries({ queryKey: ["dashboard"] }); } }); }
 
 export function useCertifications() {
@@ -108,6 +123,17 @@ export function useMarkNotificationRead() {
     mutationFn: async (id: string) => {
       if (USE_MOCKS) return;
       await api.post(`/notifications/${id}/read`);
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["notifications"] }),
+  });
+}
+
+export function useMarkAllNotificationsRead() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async () => {
+      if (USE_MOCKS) return;
+      await api.post("/notifications/read-all");
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["notifications"] }),
   });

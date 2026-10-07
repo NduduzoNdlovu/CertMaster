@@ -5,7 +5,9 @@ namespace CertMaster.Application.Features.Dashboard;
 
 public record TopicMasteryDto(string Topic, int MasteryPercent);
 
-public record RecentAttemptDto(Guid Id, string Mode, DateTime StartedAtUtc, int Score, bool Passed, int TotalQuestions, int CorrectCount);
+public record RecentAttemptDto(Guid Id, string CertificationName, string Mode, DateTime StartedAtUtc, DateTime? CompletedAtUtc, int DurationSeconds, int Score, bool Passed, int TotalQuestions, int CorrectCount);
+
+public record DailyActivityDto(string Date, int Minutes);
 
 public record DashboardSummaryDto(
     int StudyStreakDays,
@@ -16,7 +18,8 @@ public record DashboardSummaryDto(
     int ExamReadinessScore,
     List<TopicMasteryDto> WeakTopics,
     List<TopicMasteryDto> StrongTopics,
-    List<RecentAttemptDto> RecentAttempts);
+    List<RecentAttemptDto> RecentAttempts,
+    List<DailyActivityDto> DailyActivity);
 
 public class DashboardService
 {
@@ -38,6 +41,7 @@ public class DashboardService
 
         var attempts = await _db.ExamAttempts
             .Where(a => a.UserId == userId && a.CompletedAtUtc != null)
+            .Include(a => a.Certification)
             .OrderByDescending(a => a.StartedAtUtc)
             .ToListAsync(ct);
 
@@ -77,8 +81,34 @@ public class DashboardService
             WeakTopics: masteryByTopic.OrderBy(t => t.MasteryPercent).Take(3).ToList(),
             StrongTopics: masteryByTopic.OrderByDescending(t => t.MasteryPercent).Take(3).ToList(),
             RecentAttempts: attempts.Take(5)
-                .Select(a => new RecentAttemptDto(a.Id, a.Mode.ToString(), a.StartedAtUtc, a.Score, a.Passed, a.TotalQuestions, a.CorrectCount))
-                .ToList());
+                .Select(a => new RecentAttemptDto(
+                    a.Id,
+                    a.Certification?.Name ?? "Unknown",
+                    a.Mode.ToString(),
+                    a.StartedAtUtc,
+                    a.CompletedAtUtc,
+                    a.DurationSeconds,
+                    a.Score,
+                    a.Passed,
+                    a.TotalQuestions,
+                    a.CorrectCount))
+                .ToList(),
+            DailyActivity: BuildDailyActivity(attempts));
+    }
+
+
+    private static List<DailyActivityDto> BuildDailyActivity(List<Domain.Entities.ExamAttempt> attempts)
+    {
+        var today = DateTime.UtcNow.Date;
+
+        return Enumerable.Range(0, 7)
+            .Select(offset => today.AddDays(-6 + offset))
+            .Select(date => new DailyActivityDto(
+                date.ToString("yyyy-MM-dd"),
+                attempts
+                    .Where(a => a.StartedAtUtc.Date == date)
+                    .Sum(a => a.DurationSeconds) / 60))
+            .ToList();
     }
 
     /// <summary>

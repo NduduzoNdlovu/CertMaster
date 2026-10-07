@@ -39,7 +39,7 @@ export type Difficulty = "Easy" | "Medium" | "Hard";
 export interface QuestionOption {
   id: string;
   text: string;
-  isCorrect: boolean;
+  isCorrect?: boolean;
 }
 
 export interface Question {

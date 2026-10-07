@@ -11,6 +11,7 @@ import {
   Crown,
   Layers,
   Settings,
+  Bell,
   HelpCircle,
   ChevronsLeft,
   ChevronsRight,
@@ -34,6 +35,7 @@ const learnerNav = [
   { to: "/certifications", label: "Certifications", icon: Award },
   { to: "/leaderboard", label: "Leaderboard", icon: Trophy },
   { to: "/premium", label: "Premium", icon: Crown },
+  { to: "/notifications", label: "Notifications", icon: Bell },
 ];
 
 const learnerFooterNav = [

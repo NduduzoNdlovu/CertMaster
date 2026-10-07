@@ -4,7 +4,7 @@ using Microsoft.EntityFrameworkCore;
 
 namespace CertMaster.Application.Features.Questions;
 
-public record QuestionOptionDto(Guid Id, string Text, bool IsCorrect);
+public record QuestionOptionDto(Guid Id, string Text);
 
 public record QuestionDto(
     Guid Id,
@@ -53,7 +53,7 @@ public class QuestionService
                 q.Reference,
                 q.ImageUrl,
                 q.Options.OrderBy(o => o.SortOrder)
-                    .Select(o => new QuestionOptionDto(o.Id, o.Text, o.IsCorrect))
+                    .Select(o => new QuestionOptionDto(o.Id, o.Text))
                     .ToList()))
             .ToListAsync(ct);
     }

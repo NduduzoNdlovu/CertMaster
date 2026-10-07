@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Bell, Menu, MessageSquare, Search, Settings, LogOut, GraduationCap, FileQuestion, Award, BookOpen } from "lucide-react";
 import { useAuth } from "../../context/AuthContext";
 import { useNavigate } from "react-router-dom";
-import { useNotifications, useMarkNotificationRead, useSearch } from "../../hooks/useApiData";
+import { useNotifications, useMarkNotificationRead, useMarkAllNotificationsRead, useSearch } from "../../hooks/useApiData";
 
 export function Header({ onMenuClick }: { onMenuClick: () => void }) {
   const { user, logout } = useAuth();
@@ -14,6 +14,7 @@ export function Header({ onMenuClick }: { onMenuClick: () => void }) {
 
   const { data: notifications } = useNotifications();
   const markRead = useMarkNotificationRead();
+  const markAllRead = useMarkAllNotificationsRead();
   const { data: searchResults, isFetching: isSearching } = useSearch(searchTerm);
   const unreadCount = notifications?.filter((n) => !n.isRead).length ?? 0;
 
@@ -106,6 +107,7 @@ export function Header({ onMenuClick }: { onMenuClick: () => void }) {
               <div className="px-4 py-2 flex items-center justify-between border-b border-border-subtle">
                 <span className="text-sm font-semibold text-text-primary">Notifications</span>
                 {unreadCount > 0 && <span className="text-xs text-brand-primary font-medium">{unreadCount} new</span>}
+                <button onMouseDown={() => markAllRead.mutate()} className="text-xs text-text-secondary hover:text-brand-primary" disabled={!unreadCount}>Mark all read</button>
               </div>
               {notifications?.length === 0 && (
                 <p className="px-4 py-4 text-sm text-text-secondary">You're all caught up.</p>

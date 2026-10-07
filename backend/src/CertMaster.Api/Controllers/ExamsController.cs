@@ -37,6 +37,16 @@ public class ExamsController : ControllerBase
     public async Task<ActionResult> SaveAnswer(Guid attemptId, Guid questionId, SaveExamAnswerRequest request, CancellationToken ct)
     { await _examService.SaveAnswerAsync(attemptId, questionId, request, ct); return NoContent(); }
 
+    [HttpPost("{attemptId:guid}/practice-answers/{questionId:guid}")]
+    public async Task<ActionResult<PracticeAnswerResultDto>> SubmitPracticeAnswer(
+        Guid attemptId,
+        Guid questionId,
+        SaveExamAnswerRequest request,
+        CancellationToken ct)
+    {
+        return Ok(await _examService.SubmitPracticeAnswerAsync(attemptId, questionId, request, ct));
+    }
+
     [HttpPost("{attemptId:guid}/complete")]
     public async Task<ActionResult<ExamResultDto>> Complete(Guid attemptId, CancellationToken ct) => Ok(await _examService.CompleteAsync(attemptId, ct));
 

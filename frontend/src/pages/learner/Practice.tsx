@@ -1,79 +1,118 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Bookmark, Flag, Shuffle, CheckCircle2, XCircle } from "lucide-react";
-import { usePracticeQuestions, useBookmarkedIds, useToggleBookmark, useReportQuestion, useSubmitExam } from "../../hooks/useApiData";
+import {
+  useCertifications,
+  useBookmarkedIds,
+  useToggleBookmark,
+  useReportQuestion,
+  useStartExam,
+  useSubmitPracticeAnswer,
+  useCompleteExam,
+} from "../../hooks/useApiData";
 import { Card, SectionHeading, Badge } from "../../components/ui/Primitives";
 import { Button } from "../../components/ui/Button";
+import type { ExamSession, ExamSubmitResult } from "../../types";
 
 export default function Practice() {
   const [params] = useSearchParams();
-  const certId = params.get("cert") ?? undefined;
-  const { data: questions, isLoading } = usePracticeQuestions(certId);
-  const { data: bookmarkedIds } = useBookmarkedIds();
-  const toggleBookmark = useToggleBookmark();
-  const reportQuestion = useReportQuestion();
-  const submitExam = useSubmitExam();
-
-  const [index, setIndex] = useState(0);
+  const initialCertId = params.get("cert") ?? "";
+  const { data: certifications = [] } = useCertifications();
+  const [certId, setCertId] = useState(initialCertId);
+  const [session, setSession] = useState<ExamSession>();
+  const [current, setCurrent] = useState(0);
+  const [result, setResult] = useState<ExamSubmitResult>();
   const [selectedOption, setSelectedOption] = useState<string | null>(null);
-  const [revealed, setRevealed] = useState(false);
-  const [difficulty, setDifficulty] = useState<string>("All");
+  const [feedback, setFeedback] = useState<{ isCorrect: boolean; correctOption?: string; explanation: string } | null>(null);
+  const [flagged, setFlagged] = useState<Set<string>>(new Set());
   const [reportOpen, setReportOpen] = useState(false);
   const [reportReason, setReportReason] = useState("");
   const [reportSent, setReportSent] = useState(false);
-  const [questionStartedAt, setQuestionStartedAt] = useState(() => Date.now());
 
-  if (isLoading || !questions) {
-    return <p className="text-sm text-text-secondary">Loading practice questions...</p>;
-  }
+  const { data: bookmarkedIds } = useBookmarkedIds();
+  const toggleBookmark = useToggleBookmark();
+  const reportQuestion = useReportQuestion();
+  const start = useStartExam();
+  const submitAnswer = useSubmitPracticeAnswer();
+  const complete = useCompleteExam();
 
-  const filtered = difficulty === "All" ? questions : questions.filter((q) => q.difficulty === difficulty);
+  const question = useMemo(() => session?.questions[current], [session, current]);
+  const selectedCertification = certifications.find((c) => c.id === certId);
 
-  if (filtered.length === 0) {
-    return (
-      <Card className="p-8 max-w-lg mx-auto text-center">
-        <p className="text-sm text-text-secondary">
-          {questions.length === 0
-            ? "No published questions yet for this certification. An administrator needs to import and publish a question bank first."
-            : "No questions match this difficulty filter yet — try a different one."}
-        </p>
-      </Card>
-    );
-  }
+  const begin = async () => {
+    if (!certId) return;
+    try {
+      const next = await start.mutateAsync({ certificationId: certId, mode: "Practice" });
+      setSession(next);
+      setCurrent(0);
+      setResult(undefined);
+      setSelectedOption(next.questions[0]?.selectedOptionId ?? null);
+      setFeedback(null);
+      setFlagged(new Set(next.questions.filter(q => q.wasFlaggedForReview).map(q => q.id)));
+    } catch {
+      // Error is displayed below.
+    }
+  };
 
-  const question = filtered[index % filtered.length];
-  const isBookmarked = question ? bookmarkedIds?.has(question.id) ?? false : false;
-
-  const isCorrect = (optionId: string) => question.options.find((o) => o.id === optionId)?.isCorrect;
-
-  const handleSelect = (optionId: string) => {
-    if (revealed || !question) return;
+  const selectAnswer = async (optionId: string) => {
+    if (!session || !question || feedback || submitAnswer.isPending) return;
     setSelectedOption(optionId);
-    setRevealed(true);
 
-    submitExam.mutate({
-      certificationId: question.certificationId,
-      mode: "Practice",
-      durationSeconds: Math.max(1, Math.round((Date.now() - questionStartedAt) / 1000)),
-      answers: [{ questionId: question.id, selectedOptionId: optionId, wasFlaggedForReview: false }],
-    });
+    try {
+      const response = await submitAnswer.mutateAsync({
+        attemptId: session.attemptId,
+        questionId: question.id,
+        selectedOptionId: optionId,
+        wasFlaggedForReview: flagged.has(question.id),
+      });
+      setFeedback(response);
+    } catch {
+      setSelectedOption(null);
+    }
+  };
+
+  const toggleFlag = () => {
+    if (!question || !session) return;
+    const next = new Set(flagged);
+    if (next.has(question.id)) next.delete(question.id);
+    else next.add(question.id);
+    setFlagged(next);
+    if (selectedOption) {
+      void submitAnswer.mutateAsync({
+        attemptId: session.attemptId,
+        questionId: question.id,
+        selectedOptionId: selectedOption,
+        wasFlaggedForReview: next.has(question.id),
+      });
+    }
   };
 
   const nextQuestion = () => {
-    setIndex((i) => (i + 1) % filtered.length);
-    setSelectedOption(null);
-    setRevealed(false);
+    if (!session || current >= session.questions.length - 1) return;
+    const nextIndex = current + 1;
+    const nextQuestion = session.questions[nextIndex];
+    setCurrent(nextIndex);
+    setSelectedOption(nextQuestion.selectedOptionId ?? null);
+    setFeedback(null);
     setReportOpen(false);
     setReportSent(false);
     setReportReason("");
-    setQuestionStartedAt(Date.now());
+  };
+
+  const finish = async () => {
+    if (!session || complete.isPending) return;
+    try {
+      setResult(await complete.mutateAsync(session.attemptId));
+    } catch {
+      // Keep the session visible so the learner can retry.
+    }
   };
 
   const shuffle = () => {
-    setIndex(Math.floor(Math.random() * filtered.length));
-    setSelectedOption(null);
-    setRevealed(false);
-    setQuestionStartedAt(Date.now());
+    if (!session) return;
+    setCurrent(Math.floor(Math.random() * session.questions.length));
+    setFeedback(null);
+    setSelectedOption(session.questions[current]?.selectedOptionId ?? null);
   };
 
   const handleReportSubmit = () => {
@@ -84,48 +123,77 @@ export default function Practice() {
     );
   };
 
+  if (!session) {
+    return (
+      <div className="space-y-6">
+        <SectionHeading title="Practice" description="Work through a focused set of questions with instant feedback." />
+        <Card className="p-6 max-w-2xl">
+          <label className="block text-sm font-medium text-text-primary mb-2">Certification</label>
+          <select
+            value={certId}
+            onChange={(e) => setCertId(e.target.value)}
+            className="w-full h-11 px-3 rounded-md border border-border-subtle bg-white text-sm"
+          >
+            <option value="">Choose a certification</option>
+            {certifications.map(cert => <option key={cert.id} value={cert.id}>{cert.name} ({cert.code})</option>)}
+          </select>
+          {selectedCertification && (
+            <p className="text-sm text-text-secondary mt-3">
+              You will receive up to 20 published questions from {selectedCertification.name}. Your progress is saved while the session is active.
+            </p>
+          )}
+          <Button className="mt-5" onClick={begin} disabled={!certId || start.isPending}>
+            {start.isPending ? "Preparing..." : "Start practice"}
+          </Button>
+          {start.isError && <p className="text-sm text-state-error mt-3">Could not start practice. Make sure this certification has published questions.</p>}
+        </Card>
+      </div>
+    );
+  }
+
+  if (result) {
+    return (
+      <Card className="p-8 max-w-2xl mx-auto text-center">
+        <Badge tone={result.passed ? "success" : "warning"}>Practice complete</Badge>
+        <h1 className="text-3xl font-bold mt-4">{result.score}%</h1>
+        <p className="text-text-secondary mt-1">{result.correctCount} of {result.totalQuestions} correct</p>
+        <Button className="mt-6" onClick={() => { setSession(undefined); setResult(undefined); }}>
+          Start another practice session
+        </Button>
+      </Card>
+    );
+  }
+
+  if (!question) return <p className="text-sm text-state-error">This practice session has no questions.</p>;
+
+  const isBookmarked = bookmarkedIds?.has(question.id) ?? false;
+  const isLast = current === session.questions.length - 1;
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <SectionHeading title="Practice mode" description="Unlimited attempts with instant feedback and explanations" />
-        <div className="flex items-center gap-2">
-          <select
-            value={difficulty}
-            onChange={(e) => { setDifficulty(e.target.value); setIndex(0); setRevealed(false); setSelectedOption(null); }}
-            className="h-11 px-3 rounded-md border border-border-subtle bg-white text-sm"
-          >
-            <option>All</option>
-            <option>Easy</option>
-            <option>Medium</option>
-            <option>Hard</option>
-          </select>
-          <Button variant="secondary" size="sm" onClick={shuffle}>
-            <Shuffle size={16} /> Shuffle
-          </Button>
-        </div>
+        <SectionHeading title={`Practice — ${session.certificationName}`} description={`Question ${current + 1} of ${session.questions.length}`} />
+        <Button variant="secondary" size="sm" onClick={shuffle}><Shuffle size={16} /> Shuffle</Button>
       </div>
 
       <Card className="p-6">
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2">
-            <Badge tone="brand">{question?.topic}</Badge>
-            <Badge tone={question?.difficulty === "Hard" ? "error" : question?.difficulty === "Medium" ? "warning" : "success"}>
-              {question?.difficulty}
-            </Badge>
+            <Badge tone="brand">{question.topic}</Badge>
+            <Badge>Practice</Badge>
           </div>
           <div className="flex items-center gap-1">
+            <button onClick={toggleFlag} className={`h-10 w-10 flex items-center justify-center rounded-md hover:bg-bg-alt ${flagged.has(question.id) ? "text-brand-accent" : "text-text-secondary"}`} aria-label="Flag question">
+              <Flag size={18} />
+            </button>
             <button
-              onClick={() => question && toggleBookmark.mutate(question.id)}
-              className={`h-10 w-10 flex items-center justify-center rounded-md hover:bg-bg-alt ${isBookmarked ? "text-brand-primary" : "text-text-secondary hover:text-brand-primary"}`}
+              onClick={() => toggleBookmark.mutate(question.id)}
+              className={`h-10 w-10 flex items-center justify-center rounded-md hover:bg-bg-alt ${isBookmarked ? "text-brand-primary" : "text-text-secondary"}`}
               aria-label="Bookmark question"
             >
               <Bookmark size={18} className={isBookmarked ? "fill-brand-primary" : ""} />
             </button>
-            <button
-              onClick={() => setReportOpen((v) => !v)}
-              className="h-10 w-10 flex items-center justify-center rounded-md text-text-secondary hover:bg-bg-alt hover:text-state-error"
-              aria-label="Report question"
-            >
+            <button onClick={() => setReportOpen(v => !v)} className="h-10 w-10 flex items-center justify-center rounded-md text-text-secondary hover:bg-bg-alt hover:text-state-error" aria-label="Report question">
               <Flag size={18} />
             </button>
           </div>
@@ -138,16 +206,8 @@ export default function Practice() {
             ) : (
               <>
                 <label className="block text-sm font-medium text-text-primary mb-1.5">What's wrong with this question?</label>
-                <textarea
-                  value={reportReason}
-                  onChange={(e) => setReportReason(e.target.value)}
-                  rows={2}
-                  placeholder="e.g. the marked correct answer looks wrong, a typo, an outdated reference..."
-                  className="w-full px-3 py-2 rounded-md border border-border-subtle bg-white text-sm mb-2"
-                />
-                <Button size="sm" onClick={handleReportSubmit} disabled={reportQuestion.isPending}>
-                  {reportQuestion.isPending ? "Sending..." : "Submit report"}
-                </Button>
+                <textarea value={reportReason} onChange={e => setReportReason(e.target.value)} rows={2} className="w-full px-3 py-2 rounded-md border border-border-subtle bg-white text-sm mb-2" />
+                <Button size="sm" onClick={handleReportSubmit} disabled={reportQuestion.isPending}>{reportQuestion.isPending ? "Sending..." : "Submit report"}</Button>
               </>
             )}
           </div>
@@ -156,38 +216,51 @@ export default function Practice() {
         <p className="text-base font-medium text-text-primary mb-5">{question.prompt}</p>
 
         <div className="space-y-3">
-          {question.options.map((opt) => {
-            const showCorrect = revealed && opt.isCorrect;
-            const showIncorrect = revealed && selectedOption === opt.id && !opt.isCorrect;
+          {question.options.map(opt => {
+            const correct = feedback?.isCorrect && selectedOption === opt.id;
+            const selectedWrong = feedback && selectedOption === opt.id && !feedback.isCorrect;
             return (
               <button
                 key={opt.id}
-                onClick={() => handleSelect(opt.id)}
-                className={`w-full text-left px-4 py-3 rounded-md border text-sm flex items-center justify-between transition-colors min-h-[44px]
-                  ${showCorrect ? "border-state-success bg-green-50" : showIncorrect ? "border-state-error bg-red-50" : "border-border-subtle hover:bg-bg-alt"}
-                `}
+                onClick={() => void selectAnswer(opt.id)}
+                disabled={Boolean(feedback) || submitAnswer.isPending}
+                className={`w-full text-left px-4 py-3 rounded-md border text-sm flex items-center justify-between min-h-[44px] ${
+                  correct ? "border-state-success bg-green-50" :
+                  selectedWrong ? "border-state-error bg-red-50" :
+                  "border-border-subtle hover:bg-bg-alt"
+                }`}
               >
-                <span className="text-text-primary">{opt.text}</span>
-                {showCorrect && <CheckCircle2 size={18} className="text-state-success shrink-0" />}
-                {showIncorrect && <XCircle size={18} className="text-state-error shrink-0" />}
+                <span>{opt.text}</span>
+                {correct && <CheckCircle2 size={18} className="text-state-success" />}
+                {selectedWrong && <XCircle size={18} className="text-state-error" />}
               </button>
             );
           })}
         </div>
 
-        {revealed && (
+        {feedback && (
           <div className="mt-5 p-4 rounded-md bg-bg-alt border border-border-subtle">
-            <p className="text-sm font-semibold text-text-primary mb-1">
-              {selectedOption && isCorrect(selectedOption) ? "Correct!" : "Not quite."}
-            </p>
-            <p className="text-sm text-text-secondary">{question.explanation}</p>
-            {question.reference && <p className="text-xs text-text-secondary mt-2">Reference: {question.reference}</p>}
+            <p className="text-sm font-semibold">{feedback.isCorrect ? "Correct!" : `Not quite. Correct answer: ${feedback.correctOption ?? "See explanation."}`}</p>
+            <p className="text-sm text-text-secondary mt-1">{feedback.explanation}</p>
           </div>
         )}
 
-        <div className="flex justify-end mt-5">
-          <Button onClick={nextQuestion} disabled={!revealed}>Next question</Button>
+        <div className="flex justify-between mt-5">
+          <Button variant="secondary" disabled={current === 0} onClick={() => {
+            const i = current - 1;
+            setCurrent(i);
+            setSelectedOption(session.questions[i]?.selectedOptionId ?? null);
+            setFeedback(null);
+          }}>Previous</Button>
+          {isLast ? (
+            <Button onClick={() => void finish()} disabled={!feedback || complete.isPending}>
+              {complete.isPending ? "Finishing..." : "Finish practice"}
+            </Button>
+          ) : (
+            <Button onClick={nextQuestion} disabled={!feedback}>Next question</Button>
+          )}
         </div>
+        {complete.isError && <p className="text-sm text-state-error mt-3">Could not save the result. Your answers are still saved; please try again.</p>}
       </Card>
     </div>
   );
