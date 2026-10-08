@@ -122,8 +122,19 @@ public class ExamService
             .OrderBy(_ => Guid.NewGuid()).Take(take).ToListAsync(ct);
         if (questions.Count == 0) throw new InvalidOperationException("No published questions are available.");
 
-        var attempt = new ExamAttempt { UserId = userId, CertificationId = certification.Id, Certification = certification,
-            Mode = mode, StartedAtUtc = DateTime.UtcNow, TotalQuestions = questions.Count };
+        // var attempt = new ExamAttempt { UserId = userId, CertificationId = certification.Id, Certification = certification,
+        //     Mode = mode, StartedAtUtc = DateTime.UtcNow, TotalQuestions = questions.Count };
+
+var attempt = new ExamAttempt
+{
+    UserId = userId,
+    CertificationId = certification.Id,
+    Mode = mode,
+    StartedAtUtc = DateTime.UtcNow,
+    TotalQuestions = questions.Count
+};
+
+
         foreach (var question in questions) attempt.Answers.Add(new ExamAnswer { QuestionId = question.Id, Question = question });
         _db.ExamAttempts.Add(attempt);
         try { await _db.SaveChangesAsync(ct); }
@@ -264,6 +275,7 @@ public class ExamService
     public async Task<ExamAttemptDetailDto?> GetMyResultAsync(Guid attemptId, CancellationToken ct)
     {
         var userId = _currentUser.UserId ?? throw new UnauthorizedAccessException();
+
         var attempt = await _db.ExamAttempts.AsNoTracking()
             .Include(a => a.Certification).Include(a => a.Answers).ThenInclude(a => a.Question).ThenInclude(q => q!.Options)
             .FirstOrDefaultAsync(a => a.Id == attemptId && a.UserId == userId && a.CompletedAtUtc != null, ct);

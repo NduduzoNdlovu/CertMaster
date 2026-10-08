@@ -79,6 +79,11 @@ export interface ExamSessionQuestion { id: string; topic: string; prompt: string
 export interface ExamSession { attemptId: string; certificationId: string; certificationName: string; mode: "Practice" | "MockExam"; startedAtUtc: string; expiresAtUtc: string; serverTimeUtc: string; passingScorePercent: number; questions: ExamSessionQuestion[]; }
 export interface PagedResult<T> { items: T[]; page: number; pageSize: number; totalCount: number; totalPages: number; }
 export interface AdminUser { id: string; fullName: string; email: string; role: string; plan: string; isSuspended: boolean; createdAtUtc: string; }
+export interface AdminUserDetail extends AdminUser { emailConfirmed: boolean; premiumExpiresAtUtc?: string; studyStreakDays: number; lastActivityAtUtc?: string; completedAttempts: number; averageScore: number; }
+export interface AdminCertification { id: string; code: string; name: string; vendor: string; version: string; description: string; isActive: boolean; examDurationMinutes: number; passingScorePercent: number; mockExamQuestionCount: number; topicCount: number; questionCount: number; }
+export interface AdminResult { id: string; userId: string; userName: string; userEmail: string; certificationId: string; certificationName: string; mode: "Practice" | "MockExam"; startedAtUtc: string; completedAtUtc: string; durationSeconds: number; totalQuestions: number; correctCount: number; score: number; passed: boolean; }
+export interface AdminResultDetail { attempt: Omit<AdminResult, "certificationId"> & { certificationName: string }; answers: { questionId: string; prompt: string; isCorrect: boolean; selectedOptionId?: string; wasFlaggedForReview: boolean }[]; }
+export interface AdminQuestion { id: string; certificationId: string; certificationName: string; questionBankVersionId: string; topic: string; subtopic?: string; difficulty: string; prompt: string; explanation: string; reference?: string; questionType: string; status: "Draft" | "Published" | "Flagged"; options: { id: string; text: string; isCorrect: boolean; sortOrder: number }[]; }
 export interface AuditLog { id: string; actorEmail: string; action: string; target?: string; level: string; createdAtUtc: string; }
 export interface Payment { id: string; userEmail?: string; plan: string; amountZar: number; status: string; createdAtUtc: string; }
 

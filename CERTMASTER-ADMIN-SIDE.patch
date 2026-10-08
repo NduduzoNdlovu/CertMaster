@@ -1,0 +1,745 @@
+diff --git a/backend/src/CertMaster.Api/Controllers/AdminController.cs b/backend/src/CertMaster.Api/Controllers/AdminController.cs
+index a1d8d09..021f434 100644
+--- a/backend/src/CertMaster.Api/Controllers/AdminController.cs
++++ b/backend/src/CertMaster.Api/Controllers/AdminController.cs
+@@ -1,5 +1,7 @@
+ using CertMaster.Application.Common.Interfaces;
+ using CertMaster.Application.Features.Admin;
++using CertMaster.Application.Features.Certifications;
++using CertMaster.Application.Features.Notifications;
+ using CertMaster.Domain.Entities;
+ using CertMaster.Domain.Enums;
+ using Microsoft.AspNetCore.Authorization;
+@@ -16,12 +18,14 @@ public class AdminController : ControllerBase
+     private readonly AdminService _adminService;
+     private readonly IApplicationDbContext _db;
+     private readonly ICurrentUserService _currentUser;
++    private readonly CertificationService _certificationService;
+ 
+-    public AdminController(AdminService adminService, IApplicationDbContext db, ICurrentUserService currentUser)
++    public AdminController(AdminService adminService, IApplicationDbContext db, ICurrentUserService currentUser, CertificationService certificationService)
+     {
+         _adminService = adminService;
+         _db = db;
+         _currentUser = currentUser;
++        _certificationService = certificationService;
+     }
+ 
+     [HttpGet("overview")]
+@@ -70,6 +74,59 @@ public class AdminController : ControllerBase
+         return Ok(new { items = users, page, pageSize, totalCount, totalPages = (int)Math.Ceiling(totalCount / (double)pageSize) });
+     }
+ 
++    [HttpGet("certifications")]
++    public async Task<ActionResult> GetCertifications(CancellationToken ct)
++    {
++        var certifications = await _db.Certifications.AsNoTracking()
++            .OrderBy(c => c.Name)
++            .Select(c => new
++            {
++                c.Id, c.Code, c.Name, c.Vendor, Version = c.CurrentVersion,
++                c.Description, c.IsActive, c.ExamDurationMinutes, c.PassingScorePercent,
++                c.MockExamQuestionCount,
++                TopicCount = c.Topics.Count,
++                QuestionCount = c.Questions.Count(q => q.Status == QuestionStatus.Published)
++            }).ToListAsync(ct);
++        return Ok(certifications);
++    }
++
++    public record UpdateCertificationRequest(
++        string Code, string Name, string Vendor, string Version, string Description,
++        bool IsActive, int ExamDurationMinutes, int PassingScorePercent, int MockExamQuestionCount);
++
++    [HttpPut("certifications/{id:guid}")]
++    public async Task<ActionResult> UpdateCertification(Guid id, UpdateCertificationRequest request, CancellationToken ct)
++    {
++        if (string.IsNullOrWhiteSpace(request.Code) || string.IsNullOrWhiteSpace(request.Name))
++            return BadRequest(new { error = "Certification code and name are required." });
++        if (request.ExamDurationMinutes is < 1 or > 480 || request.PassingScorePercent is < 1 or > 100 || request.MockExamQuestionCount is < 1 or > 500)
++            return BadRequest(new { error = "Duration must be 1-480 minutes, pass mark 1-100, and question count 1-500." });
++
++        var certification = await _db.Certifications.FirstOrDefaultAsync(c => c.Id == id, ct);
++        if (certification is null) return NotFound();
++
++        certification.Code = request.Code.Trim();
++        certification.Name = request.Name.Trim();
++        certification.Vendor = request.Vendor?.Trim() ?? string.Empty;
++        certification.CurrentVersion = request.Version?.Trim() ?? string.Empty;
++        certification.Description = request.Description?.Trim() ?? string.Empty;
++        certification.IsActive = request.IsActive;
++        certification.ExamDurationMinutes = request.ExamDurationMinutes;
++        certification.PassingScorePercent = request.PassingScorePercent;
++        certification.MockExamQuestionCount = request.MockExamQuestionCount;
++
++        _db.AuditLogEntries.Add(new AuditLogEntry
++        {
++            ActorEmail = _currentUser.Email ?? "unknown",
++            Action = "Updated certification settings",
++            Target = certification.Code,
++            Level = "Info"
++        });
++        await _db.SaveChangesAsync(ct);
++        await _certificationService.InvalidateCacheAsync(ct);
++        return NoContent();
++    }
++
+     [HttpGet("users/{id:guid}")]
+     public async Task<ActionResult> GetUser(Guid id, CancellationToken ct)
+     {
+@@ -116,6 +173,145 @@ public class AdminController : ControllerBase
+         return NoContent();
+     }
+ 
++    [HttpGet("results")]
++    public async Task<ActionResult> GetResults(
++        [FromQuery] string? search, [FromQuery] Guid? certificationId, [FromQuery] string? mode,
++        [FromQuery] bool? passed, [FromQuery] int page = 1, [FromQuery] int pageSize = 25,
++        CancellationToken ct = default)
++    {
++        page = Math.Max(1, page); pageSize = Math.Clamp(pageSize, 1, 100);
++        var query = _db.ExamAttempts.AsNoTracking().Where(a => a.CompletedAtUtc != null);
++        if (certificationId.HasValue) query = query.Where(a => a.CertificationId == certificationId.Value);
++        if (Enum.TryParse<ExamMode>(mode, true, out var parsedMode)) query = query.Where(a => a.Mode == parsedMode);
++        if (passed.HasValue) query = query.Where(a => a.Passed == passed.Value);
++        if (!string.IsNullOrWhiteSpace(search))
++        {
++            var term = search.Trim().ToLowerInvariant();
++            query = query.Where(a => a.User!.FullName.ToLower().Contains(term) || a.User.Email.ToLower().Contains(term));
++        }
++        var totalCount = await query.CountAsync(ct);
++        var items = await query.OrderByDescending(a => a.CompletedAtUtc).Skip((page - 1) * pageSize).Take(pageSize)
++            .Select(a => new
++            {
++                a.Id, UserId = a.UserId, UserName = a.User!.FullName, UserEmail = a.User.Email,
++                CertificationId = a.CertificationId, CertificationName = a.Certification!.Name,
++                Mode = a.Mode.ToString(), a.StartedAtUtc, a.CompletedAtUtc, a.DurationSeconds,
++                a.TotalQuestions, a.CorrectCount, a.Score, a.Passed
++            }).ToListAsync(ct);
++        return Ok(new { items, page, pageSize, totalCount, totalPages = (int)Math.Ceiling(totalCount / (double)pageSize) });
++    }
++
++    [HttpGet("results/{id:guid}")]
++    public async Task<ActionResult> GetResult(Guid id, CancellationToken ct)
++    {
++        var attempt = await _db.ExamAttempts.AsNoTracking()
++            .Include(a => a.User).Include(a => a.Certification)
++            .Include(a => a.Answers).ThenInclude(a => a.Question)
++            .FirstOrDefaultAsync(a => a.Id == id && a.CompletedAtUtc != null, ct);
++        if (attempt is null) return NotFound();
++        return Ok(new
++        {
++            attempt = new
++            {
++                attempt.Id, attempt.UserId, UserName = attempt.User!.FullName, UserEmail = attempt.User.Email,
++                CertificationName = attempt.Certification!.Name, Mode = attempt.Mode.ToString(),
++                attempt.StartedAtUtc, attempt.CompletedAtUtc, attempt.DurationSeconds,
++                attempt.TotalQuestions, attempt.CorrectCount, attempt.Score, attempt.Passed
++            },
++            answers = attempt.Answers.Select(a => new
++            {
++                a.QuestionId, Prompt = a.Question!.Prompt, a.IsCorrect,
++                a.SelectedOptionId, a.WasFlaggedForReview
++            })
++        });
++    }
++
++    [HttpGet("questions")]
++    public async Task<ActionResult> GetQuestions(
++        [FromQuery] string? search, [FromQuery] Guid? certificationId, [FromQuery] string? status,
++        [FromQuery] string? difficulty, [FromQuery] int page = 1, [FromQuery] int pageSize = 25,
++        CancellationToken ct = default)
++    {
++        page = Math.Max(1, page); pageSize = Math.Clamp(pageSize, 1, 100);
++        var query = _db.Questions.AsNoTracking();
++        if (certificationId.HasValue) query = query.Where(q => q.CertificationId == certificationId.Value);
++        if (Enum.TryParse<QuestionStatus>(status, true, out var parsedStatus)) query = query.Where(q => q.Status == parsedStatus);
++        if (Enum.TryParse<Difficulty>(difficulty, true, out var parsedDifficulty)) query = query.Where(q => q.Difficulty == parsedDifficulty);
++        if (!string.IsNullOrWhiteSpace(search))
++        {
++            var term = search.Trim().ToLowerInvariant();
++            query = query.Where(q => q.Prompt.ToLower().Contains(term) || q.Topic.ToLower().Contains(term));
++        }
++        var totalCount = await query.CountAsync(ct);
++        var items = await query.OrderBy(q => q.Topic).ThenBy(q => q.CreatedAtUtc).Skip((page - 1) * pageSize).Take(pageSize)
++            .Select(q => new
++            {
++                q.Id, q.CertificationId, CertificationName = q.Certification!.Name, q.QuestionBankVersionId,
++                q.Topic, q.Subtopic, Difficulty = q.Difficulty.ToString(), q.Prompt, q.Explanation, q.Reference,
++                q.QuestionType, Status = q.Status.ToString(),
++                Options = q.Options.OrderBy(o => o.SortOrder).Select(o => new { o.Id, o.Text, o.IsCorrect, o.SortOrder })
++            }).ToListAsync(ct);
++        return Ok(new { items, page, pageSize, totalCount, totalPages = (int)Math.Ceiling(totalCount / (double)pageSize) });
++    }
++
++    public record AdminQuestionOptionRequest(Guid? Id, string Text, bool IsCorrect, int SortOrder);
++    public record UpdateAdminQuestionRequest(
++        string Topic, string? Subtopic, Difficulty Difficulty, string Prompt, string Explanation,
++        string? Reference, string QuestionType, QuestionStatus Status, List<AdminQuestionOptionRequest> Options);
++
++    [HttpGet("questions/{id:guid}")]
++    public async Task<ActionResult> GetQuestion(Guid id, CancellationToken ct)
++    {
++        var q = await _db.Questions.AsNoTracking().Include(x => x.Options).Include(x => x.Certification)
++            .FirstOrDefaultAsync(x => x.Id == id, ct);
++        if (q is null) return NotFound();
++        return Ok(new { q.Id, q.CertificationId, CertificationName = q.Certification!.Name, q.QuestionBankVersionId,
++            q.Topic, q.Subtopic, Difficulty = q.Difficulty.ToString(), q.Prompt, q.Explanation, q.Reference, q.QuestionType, Status = q.Status.ToString(),
++            Options = q.Options.OrderBy(o => o.SortOrder).Select(o => new { o.Id, o.Text, o.IsCorrect, o.SortOrder }) });
++    }
++
++    [HttpPut("questions/{id:guid}")]
++    public async Task<ActionResult> UpdateQuestion(Guid id, UpdateAdminQuestionRequest request, CancellationToken ct)
++    {
++        if (string.IsNullOrWhiteSpace(request.Prompt) || string.IsNullOrWhiteSpace(request.Topic))
++            return BadRequest(new { error = "Topic and question text are required." });
++        if (request.Options is null || request.Options.Count < 2)
++            return BadRequest(new { error = "At least two answer options are required." });
++        if (request.QuestionType is "Choice" or "MultipleResponse" && !request.Options.Any(o => o.IsCorrect))
++            return BadRequest(new { error = "At least one correct option is required." });
++        if (request.QuestionType == "Choice" && request.Options.Count(o => o.IsCorrect) != 1)
++            return BadRequest(new { error = "Single-choice questions must have exactly one correct option." });
++
++        var q = await _db.Questions.Include(x => x.Options).FirstOrDefaultAsync(x => x.Id == id, ct);
++        if (q is null) return NotFound();
++        q.Topic = request.Topic.Trim(); q.Subtopic = string.IsNullOrWhiteSpace(request.Subtopic) ? null : request.Subtopic.Trim();
++        q.Difficulty = request.Difficulty; q.Prompt = request.Prompt.Trim(); q.Explanation = request.Explanation?.Trim() ?? string.Empty;
++        q.Reference = string.IsNullOrWhiteSpace(request.Reference) ? null : request.Reference.Trim();
++        q.QuestionType = request.QuestionType; q.Status = request.Status;
++        _db.QuestionOptions.RemoveRange(q.Options);
++        q.Options = request.Options.Select((o, i) => new QuestionOption { Text = o.Text.Trim(), IsCorrect = o.IsCorrect, SortOrder = i + 1 }).ToList();
++        _db.AuditLogEntries.Add(new AuditLogEntry { ActorEmail = _currentUser.Email ?? "unknown", Action = "Updated question", Target = q.Id.ToString(), Level = "Info" });
++        await _db.SaveChangesAsync(ct);
++        return NoContent();
++    }
++
++    public record BroadcastNotificationRequest(string Title, string Body, string Type, List<Guid>? UserIds);
++
++    [HttpPost("notifications/broadcast")]
++    public async Task<ActionResult> BroadcastNotification(BroadcastNotificationRequest request, CancellationToken ct)
++    {
++        if (string.IsNullOrWhiteSpace(request.Title) || string.IsNullOrWhiteSpace(request.Body))
++            return BadRequest(new { error = "Title and body are required." });
++        var type = string.IsNullOrWhiteSpace(request.Type) ? "General" : request.Type.Trim();
++        var users = _db.Users.Where(u => u.Role == UserRole.Learner && !u.IsSuspended);
++        if (request.UserIds is { Count: > 0 }) users = users.Where(u => request.UserIds.Contains(u.Id));
++        var userIds = await users.Select(u => u.Id).ToListAsync(ct);
++        foreach (var userId in userIds) _db.Notifications.Add(NotificationService.Build(userId, request.Title.Trim(), request.Body.Trim(), type));
++        _db.AuditLogEntries.Add(new AuditLogEntry { ActorEmail = _currentUser.Email ?? "unknown", Action = "Broadcast learner notification", Target = $"{userIds.Count} learner(s)", Level = "Info" });
++        await _db.SaveChangesAsync(ct);
++        return Ok(new { recipients = userIds.Count });
++    }
++
+     [HttpGet("maintenance")]
+     public async Task<ActionResult> GetMaintenanceWindows(CancellationToken ct)
+     {
+diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
+index 698c3f1..ab5162f 100644
+--- a/frontend/src/App.tsx
++++ b/frontend/src/App.tsx
+@@ -30,6 +30,13 @@ import AdminReports from "./pages/admin/Reports";
+ import Maintenance from "./pages/admin/Maintenance";
+ import Payments from "./pages/admin/Payments";
+ import Logs from "./pages/admin/Logs";
++import UserDetails from "./pages/admin/UserDetails";
++import AdminResults from "./pages/admin/Results";
++import ResultDetails from "./pages/admin/ResultDetails";
++import Questions from "./pages/admin/Questions";
++import QuestionDetails from "./pages/admin/QuestionDetails";
++import AdminCertifications from "./pages/admin/Certifications";
++import AdminNotifications from "./pages/admin/Notifications";
+ 
+ export default function App() {
+   return (
+@@ -74,13 +81,20 @@ export default function App() {
+         >
+           <Route path="/admin" element={<AdminDashboard />} />
+           <Route path="/admin/users" element={<AdminUsers />} />
++          <Route path="/admin/users/:id" element={<UserDetails />} />
+           <Route path="/admin/question-banks" element={<QuestionBanks />} />
++          <Route path="/admin/questions" element={<Questions />} />
++          <Route path="/admin/questions/:id" element={<QuestionDetails />} />
++          <Route path="/admin/certifications" element={<AdminCertifications />} />
+           <Route path="/admin/imports/:jobId" element={<ImportReview />} />
+           <Route path="/admin/analytics" element={<AdminAnalytics />} />
++          <Route path="/admin/results" element={<AdminResults />} />
++          <Route path="/admin/results/:id" element={<ResultDetails />} />
+           <Route path="/admin/reports" element={<AdminReports />} />
+           <Route path="/admin/maintenance" element={<Maintenance />} />
+           <Route path="/admin/payments" element={<Payments />} />
+           <Route path="/admin/logs" element={<Logs />} />
++          <Route path="/admin/notifications" element={<AdminNotifications />} />
+         </Route>
+ 
+         <Route path="/" element={<Navigate to="/dashboard" replace />} />
+diff --git a/frontend/src/components/layout/MobileNav.tsx b/frontend/src/components/layout/MobileNav.tsx
+index a98a643..5a922d5 100644
+--- a/frontend/src/components/layout/MobileNav.tsx
++++ b/frontend/src/components/layout/MobileNav.tsx
+@@ -1,5 +1,5 @@
+ import { NavLink } from "react-router-dom";
+-import { LayoutDashboard, Dumbbell, FileClock, TrendingUp, X, Bookmark, Award, Trophy, Crown, Settings, HelpCircle, Layers, Bell, BarChart3 } from "lucide-react";
++import { LayoutDashboard, Dumbbell, FileClock, TrendingUp, X, Bookmark, Award, Trophy, Crown, Settings, HelpCircle, Layers, Bell, BarChart3, Users, Database, Flag, Wrench, CreditCard, ScrollText, FileQuestion } from "lucide-react";
+ import { useAuth } from "../../context/AuthContext";
+ 
+ const bottomItems = [
+@@ -8,75 +8,19 @@ const bottomItems = [
+   { to: "/mock-exams", label: "Exams", icon: FileClock },
+   { to: "/progress", label: "Progress", icon: TrendingUp },
+ ];
+-
+-export function BottomNav() {
+-  return (
+-    <nav className="lg:hidden fixed bottom-0 left-0 right-0 z-30 bg-bg-card border-t border-border-subtle flex items-stretch h-16">
+-      {bottomItems.map((item) => (
+-        <NavLink
+-          key={item.to}
+-          to={item.to}
+-          className={({ isActive }) =>
+-            `flex-1 flex flex-col items-center justify-center gap-0.5 text-xs font-medium ${
+-              isActive ? "text-brand-primary" : "text-text-secondary"
+-            }`
+-          }
+-        >
+-          <item.icon size={22} />
+-          {item.label}
+-        </NavLink>
+-      ))}
+-    </nav>
+-  );
+-}
+-
+-const drawerExtraItems = [
+-  { to: "/bookmarks", label: "Bookmarks", icon: Bookmark },
+-  { to: "/flashcards", label: "Flashcards", icon: Layers },
+-  { to: "/certifications", label: "Certifications", icon: Award },
+-  { to: "/leaderboard", label: "Leaderboard", icon: Trophy },
+-  { to: "/premium", label: "Premium", icon: Crown },
+-  { to: "/results", label: "My Results", icon: BarChart3 },
+-  { to: "/notifications", label: "Notifications", icon: Bell },
+-  { to: "/settings", label: "Settings", icon: Settings },
+-  { to: "/help", label: "Help", icon: HelpCircle },
++const learnerItems = [
++  { to: "/bookmarks", label: "Bookmarks", icon: Bookmark }, { to: "/flashcards", label: "Flashcards", icon: Layers },
++  { to: "/certifications", label: "Certifications", icon: Award }, { to: "/leaderboard", label: "Leaderboard", icon: Trophy },
++  { to: "/premium", label: "Premium", icon: Crown }, { to: "/results", label: "My Results", icon: BarChart3 },
++  { to: "/notifications", label: "Notifications", icon: Bell }, { to: "/settings", label: "Settings", icon: Settings }, { to: "/help", label: "Help", icon: HelpCircle },
+ ];
+-
+-export function MobileDrawer({ open, onClose }: { open: boolean; onClose: () => void }) {
+-  const { user } = useAuth();
+-  if (!open) return null;
+-
+-  return (
+-    <div className="lg:hidden fixed inset-0 z-40">
+-      <div className="absolute inset-0 bg-black/40" onClick={onClose} />
+-      <div className="absolute top-0 left-0 bottom-0 w-72 bg-brand-primary text-white flex flex-col shadow-xl animate-in">
+-        <div className="h-[70px] flex items-center justify-between px-4 border-b border-white/10">
+-          <div>
+-            <p className="font-semibold">{user?.fullName}</p>
+-            <p className="text-xs text-white/70">{user?.role}</p>
+-          </div>
+-          <button onClick={onClose} className="h-11 w-11 flex items-center justify-center" aria-label="Close menu">
+-            <X size={22} />
+-          </button>
+-        </div>
+-        <nav className="flex-1 overflow-y-auto py-3 px-2 space-y-1">
+-          {drawerExtraItems.map((item) => (
+-            <NavLink
+-              key={item.to}
+-              to={item.to}
+-              onClick={onClose}
+-              className={({ isActive }) =>
+-                `flex items-center gap-3 h-12 px-3 rounded-md text-sm font-medium ${
+-                  isActive ? "bg-white/15" : "text-white/85 hover:bg-white/10"
+-                }`
+-              }
+-            >
+-              <item.icon size={20} />
+-              {item.label}
+-            </NavLink>
+-          ))}
+-        </nav>
+-      </div>
+-    </div>
+-  );
+-}
++const adminItems = [
++  { to: "/admin", label: "Overview", icon: LayoutDashboard }, { to: "/admin/users", label: "Users", icon: Users },
++  { to: "/admin/question-banks", label: "Question Banks", icon: Database }, { to: "/admin/questions", label: "Questions", icon: FileQuestion },
++  { to: "/admin/certifications", label: "Certifications", icon: Award }, { to: "/admin/reports", label: "Reported Questions", icon: Flag },
++  { to: "/admin/results", label: "Learner Results", icon: BarChart3 }, { to: "/admin/analytics", label: "Analytics", icon: TrendingUp },
++  { to: "/admin/maintenance", label: "Maintenance", icon: Wrench }, { to: "/admin/payments", label: "Payments", icon: CreditCard },
++  { to: "/admin/logs", label: "Logs", icon: ScrollText }, { to: "/admin/notifications", label: "Notifications", icon: Bell },
++];
++export function BottomNav(){return <nav className="lg:hidden fixed bottom-0 left-0 right-0 z-30 bg-bg-card border-t border-border-subtle flex items-stretch h-16">{bottomItems.map(item=><NavLink key={item.to} to={item.to} className={({isActive})=>`flex-1 flex flex-col items-center justify-center gap-0.5 text-xs font-medium ${isActive?"text-brand-primary":"text-text-secondary"}`}><item.icon size={22}/>{item.label}</NavLink>)}</nav>}
++export function MobileDrawer({open,onClose}:{open:boolean;onClose:()=>void}){const {user}=useAuth();if(!open)return null;const items=user?.role==="Administrator"?adminItems:learnerItems;return <div className="lg:hidden fixed inset-0 z-40"><div className="absolute inset-0 bg-black/40" onClick={onClose}/><div className="absolute top-0 left-0 bottom-0 w-72 bg-brand-primary text-white flex flex-col shadow-xl animate-in"><div className="h-[70px] flex items-center justify-between px-4 border-b border-white/10"><div><p className="font-semibold">{user?.fullName}</p><p className="text-xs text-white/70">{user?.role}</p></div><button onClick={onClose} className="h-11 w-11 flex items-center justify-center" aria-label="Close menu"><X size={22}/></button></div><nav className="flex-1 overflow-y-auto py-3 px-2 space-y-1">{items.map(item=><NavLink key={item.to} to={item.to} onClick={onClose} className={({isActive})=>`flex items-center gap-3 h-12 px-3 rounded-md text-sm font-medium ${isActive?"bg-white/15":"text-white/85 hover:bg-white/10"}`}><item.icon size={20}/>{item.label}</NavLink>)}</nav></div></div>}
+diff --git a/frontend/src/components/layout/Sidebar.tsx b/frontend/src/components/layout/Sidebar.tsx
+index 30691ee..d005206 100644
+--- a/frontend/src/components/layout/Sidebar.tsx
++++ b/frontend/src/components/layout/Sidebar.tsx
+@@ -21,6 +21,7 @@ import {
+   CreditCard,
+   ScrollText,
+   Flag,
++  FileQuestion,
+ } from "lucide-react";
+ import { useAuth } from "../../context/AuthContext";
+ 
+@@ -47,11 +48,15 @@ const adminNav = [
+   { to: "/admin", label: "Overview", icon: LayoutDashboard },
+   { to: "/admin/users", label: "Users", icon: Users },
+   { to: "/admin/question-banks", label: "Question Banks", icon: Database },
++  { to: "/admin/questions", label: "Questions", icon: FileQuestion },
++  { to: "/admin/certifications", label: "Certifications", icon: Award },
+   { to: "/admin/reports", label: "Reported Questions", icon: Flag },
+   { to: "/admin/analytics", label: "Analytics", icon: BarChart3 },
++  { to: "/admin/results", label: "Learner Results", icon: TrendingUp },
+   { to: "/admin/maintenance", label: "Maintenance", icon: Wrench },
+   { to: "/admin/payments", label: "Payments", icon: CreditCard },
+   { to: "/admin/logs", label: "Logs", icon: ScrollText },
++  { to: "/admin/notifications", label: "Notifications", icon: Bell },
+ ];
+ 
+ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
+diff --git a/frontend/src/hooks/useApiData.ts b/frontend/src/hooks/useApiData.ts
+index cc56bf0..0b040eb 100644
+--- a/frontend/src/hooks/useApiData.ts
++++ b/frontend/src/hooks/useApiData.ts
+@@ -23,7 +23,7 @@ import type {
+   Question,
+   QuestionReport,
+   SearchResult,
+-  ExamAttempt, ExamAttemptDetail, PagedResult, AdminUser, AuditLog, Payment, ExamSession,
++  ExamAttempt, ExamAttemptDetail, PagedResult, AdminUser, AdminUserDetail, AdminCertification, AdminResult, AdminResultDetail, AdminQuestion, AuditLog, Payment, ExamSession,
+ } from "../types";
+ 
+ const USE_MOCKS = import.meta.env.DEV && import.meta.env.VITE_USE_MOCKS === "true";
+@@ -34,7 +34,7 @@ export function useAdminUsers(params: { search?: string; role?: string; plan?: s
+   return useQuery<PagedResult<AdminUser>>({ queryKey: ["admin", "users", params], queryFn: async () => (await api.get("/admin/users", { params })).data });
+ }
+ export function useSetUserSuspended() { const qc = useQueryClient(); return useMutation({ mutationFn: async ({ id, suspended }: { id: string; suspended: boolean }) => api.post(`/admin/users/${id}/${suspended ? "suspend" : "reactivate"}`), onSuccess: () => qc.invalidateQueries({ queryKey: ["admin", "users"] }) }); }
+-export function useAdminLogs(page = 1) { return useQuery<PagedResult<AuditLog>>({ queryKey: ["admin", "logs", page], queryFn: async () => (await api.get("/admin/logs", { params: { page } })).data }); }
++export function useAdminLogs(page = 1, search = "", level = "") { return useQuery<PagedResult<AuditLog>>({ queryKey: ["admin", "logs", page, search, level], queryFn: async () => (await api.get("/admin/logs", { params: { page, search: search || undefined, level: level || undefined } })).data }); }
+ export function useAdminPayments() { return useQuery<Payment[]>({ queryKey: ["admin", "payments"], queryFn: async () => (await api.get("/admin/payments")).data }); }
+ export function usePaymentSummary() { return useQuery<{ monthlyRevenue: number; activeSubscriptions: number; monthlyPlans: number; yearlyPlans: number }>({ queryKey: ["admin", "payment-summary"], queryFn: async () => (await api.get("/admin/payment-summary")).data }); }
+ export function useAdminAnalytics() { return useQuery<{ questionAccuracyPercent: number; averageMockExamDurationMinutes: number; mostFailedTopic: string }>({ queryKey: ["admin", "analytics"], queryFn: async () => (await api.get("/admin/analytics")).data }); }
+@@ -68,6 +68,45 @@ export function useCertifications() {
+   });
+ }
+ 
++export function useAdminUser(id?: string) {
++  return useQuery<AdminUserDetail>({ queryKey: ["admin", "user", id], queryFn: async () => (await api.get(`/admin/users/${id}`)).data, enabled: Boolean(id) });
++}
++export function useAdminCertifications() {
++  return useQuery<AdminCertification[]>({ queryKey: ["admin", "certifications"], queryFn: async () => (await api.get("/admin/certifications")).data });
++}
++export function useUpdateAdminCertification() {
++  const qc = useQueryClient();
++  return useMutation({ mutationFn: async ({ id, data }: { id: string; data: Omit<AdminCertification, "id" | "topicCount" | "questionCount"> }) => api.put(`/admin/certifications/${id}`, data), onSuccess: () => { qc.invalidateQueries({ queryKey: ["admin", "certifications"] }); qc.invalidateQueries({ queryKey: ["certifications"] }); } });
++}
++export function useAdminResults(params: { search?: string; certificationId?: string; mode?: string; passed?: string; page: number; pageSize: number }) {
++  return useQuery<PagedResult<AdminResult>>({ queryKey: ["admin", "results", params], queryFn: async () => (await api.get("/admin/results", { params: { ...params, passed: params.passed === "" ? undefined : params.passed } })).data });
++}
++export function useAdminResult(id?: string) {
++  return useQuery<AdminResultDetail>({ queryKey: ["admin", "result", id], queryFn: async () => (await api.get(`/admin/results/${id}`)).data, enabled: Boolean(id) });
++}
++export function useAdminQuestions(params: { search?: string; certificationId?: string; status?: string; difficulty?: string; page: number; pageSize: number }) {
++  return useQuery<PagedResult<AdminQuestion>>({ queryKey: ["admin", "questions", params], queryFn: async () => (await api.get("/admin/questions", { params })).data });
++}
++export function useAdminQuestion(id?: string) {
++  return useQuery<AdminQuestion>({ queryKey: ["admin", "question", id], queryFn: async () => (await api.get(`/admin/questions/${id}`)).data, enabled: Boolean(id) });
++}
++export function useUpdateAdminQuestion() {
++  const qc = useQueryClient();
++  return useMutation({ mutationFn: async ({ id, data }: { id: string; data: Omit<AdminQuestion, "id" | "certificationId" | "certificationName" | "questionBankVersionId"> }) => api.put(`/admin/questions/${id}`, data), onSuccess: (_, vars) => { qc.invalidateQueries({ queryKey: ["admin", "questions"] }); qc.invalidateQueries({ queryKey: ["admin", "question", vars.id] }); qc.invalidateQueries({ queryKey: ["questions"] }); } });
++}
++export function useBroadcastNotification() {
++  const qc = useQueryClient();
++  return useMutation({ mutationFn: async (data: { title: string; body: string; type: string; userIds?: string[] }) => (await api.post("/admin/notifications/broadcast", data)).data as { recipients: number }, onSuccess: () => qc.invalidateQueries({ queryKey: ["admin", "overview"] }) });
++}
++export function useScheduleMaintenanceWindow() {
++  const qc = useQueryClient();
++  return useMutation({ mutationFn: async (data: { startsAtUtc: string; endsAtUtc: string; reason: string }) => api.post("/admin/maintenance", data), onSuccess: () => qc.invalidateQueries({ queryKey: ["admin", "maintenance"] }) });
++}
++export function useCancelMaintenanceWindow() {
++  const qc = useQueryClient();
++  return useMutation({ mutationFn: async (id: string) => api.post(`/admin/maintenance/${id}/cancel`), onSuccess: () => qc.invalidateQueries({ queryKey: ["admin", "maintenance"] }) });
++}
++
+ export function useAdminOverview() {
+   return useQuery<AdminOverview>({
+     queryKey: ["admin", "overview"],
+diff --git a/frontend/src/pages/admin/Logs.tsx b/frontend/src/pages/admin/Logs.tsx
+index 029ffcb..b8b4b2b 100644
+--- a/frontend/src/pages/admin/Logs.tsx
++++ b/frontend/src/pages/admin/Logs.tsx
+@@ -1,2 +1,5 @@
+-import { useState } from "react"; import { useAdminLogs } from "../../hooks/useApiData"; import { Card, SectionHeading, Badge } from "../../components/ui/Primitives"; import { Button } from "../../components/ui/Button";
+-export default function Logs() { const [page, setPage] = useState(1); const { data, isLoading } = useAdminLogs(page); return <div className="space-y-6"><SectionHeading title="Audit logs" description="Administrative and system-critical events from PostgreSQL" /><Card className="p-0 overflow-x-auto">{isLoading ? <p className="p-5">Loading logs...</p> : <><table className="w-full text-sm"><thead><tr className="text-left bg-bg-alt"><th className="p-3">Time</th><th>Actor</th><th>Action</th><th>Target</th><th>Level</th></tr></thead><tbody>{data?.items.map(l => <tr key={l.id} className="border-t"><td className="p-3">{new Date(l.createdAtUtc).toLocaleString()}</td><td>{l.actorEmail}</td><td>{l.action}</td><td>{l.target}</td><td><Badge tone={l.level === "Error" ? "error" : l.level === "Warning" ? "warning" : "info"}>{l.level}</Badge></td></tr>)}</tbody></table><div className="p-4 flex justify-end gap-2"><Button size="sm" variant="secondary" disabled={page <= 1} onClick={() => setPage(p => p - 1)}>Previous</Button><Button size="sm" variant="secondary" disabled={page >= (data?.totalPages || 1)} onClick={() => setPage(p => p + 1)}>Next</Button></div></>}</Card></div>; }
++import { useState } from "react";
++import { useAdminLogs } from "../../hooks/useApiData";
++import { Card, SectionHeading, Badge } from "../../components/ui/Primitives";
++import { Button } from "../../components/ui/Button";
++export default function Logs(){const [page,setPage]=useState(1);const [search,setSearch]=useState("");const [level,setLevel]=useState("");const {data,isLoading}=useAdminLogs(page,search,level);return <div className="space-y-6"><SectionHeading title="Audit logs" description="Administrative and system-critical events from PostgreSQL"/><Card className="p-4 grid gap-3 md:grid-cols-3"><input value={search} onChange={e=>{setSearch(e.target.value);setPage(1)}} placeholder="Search actor, action or target" className="h-11 px-3 rounded-md border"/><select value={level} onChange={e=>{setLevel(e.target.value);setPage(1)}} className="h-11 px-3 rounded-md border"><option value="">All levels</option><option>Info</option><option>Warning</option><option>Error</option></select><Button size="sm" variant="secondary" onClick={()=>{setSearch("");setLevel("");setPage(1)}}>Clear filters</Button></Card><Card className="p-0 overflow-x-auto">{isLoading?<p className="p-5">Loading logs...</p>:<><table className="w-full text-sm"><thead><tr className="text-left bg-bg-alt"><th className="p-3">Time</th><th>Actor</th><th>Action</th><th>Target</th><th>Level</th></tr></thead><tbody>{data?.items.map(l=><tr key={l.id} className="border-t"><td className="p-3">{new Date(l.createdAtUtc).toLocaleString()}</td><td>{l.actorEmail}</td><td>{l.action}</td><td>{l.target}</td><td><Badge tone={l.level==="Error"?"error":l.level==="Warning"?"warning":"info"}>{l.level}</Badge></td></tr>)}{data?.items.length===0&&<tr><td colSpan={5} className="p-8 text-center text-text-secondary">No matching log entries.</td></tr>}</tbody></table><div className="p-4 flex justify-end gap-2"><Button size="sm" variant="secondary" disabled={page<=1} onClick={()=>setPage(p=>p-1)}>Previous</Button><Button size="sm" variant="secondary" disabled={page>=(data?.totalPages||1)} onClick={()=>setPage(p=>p+1)}>Next</Button></div></>}</Card></div>}
+diff --git a/frontend/src/pages/admin/Maintenance.tsx b/frontend/src/pages/admin/Maintenance.tsx
+index 0e4be0f..b9cf478 100644
+--- a/frontend/src/pages/admin/Maintenance.tsx
++++ b/frontend/src/pages/admin/Maintenance.tsx
+@@ -1,58 +1,5 @@
+-import { useMaintenanceWindows } from "../../hooks/useApiData";
++import { useState } from "react";
++import { useMaintenanceWindows,useScheduleMaintenanceWindow,useCancelMaintenanceWindow } from "../../hooks/useApiData";
+ import { Card, SectionHeading, Badge } from "../../components/ui/Primitives";
+ import { Button } from "../../components/ui/Button";
+-
+-export default function Maintenance() {
+-  const { data: windows, isLoading } = useMaintenanceWindows();
+-
+-  return (
+-    <div className="space-y-6">
+-      <SectionHeading
+-        title="Maintenance"
+-        description="Schedule downtime windows; the system blocks exams that can't finish before maintenance starts"
+-        action={<Button size="sm">Schedule window</Button>}
+-      />
+-
+-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+-        <Card className="p-5">
+-          <p className="text-sm text-text-secondary">Active practice sessions</p>
+-          <p className="text-2xl font-bold text-text-primary mt-1">128</p>
+-        </Card>
+-        <Card className="p-5">
+-          <p className="text-sm text-text-secondary">Active mock exams</p>
+-          <p className="text-2xl font-bold text-text-primary mt-1">42</p>
+-        </Card>
+-        <Card className="p-5">
+-          <p className="text-sm text-text-secondary">Users online</p>
+-          <p className="text-2xl font-bold text-text-primary mt-1">314</p>
+-        </Card>
+-      </div>
+-
+-      <Card className="p-5">
+-        <SectionHeading title="Scheduled windows" />
+-        {isLoading && <p className="text-sm text-text-secondary">Loading...</p>}
+-        <div className="space-y-3">
+-          {windows?.map((w) => (
+-            <div key={w.id} className="flex items-center justify-between p-4 rounded-md bg-bg-alt">
+-              <div>
+-                <p className="text-sm font-medium text-text-primary">
+-                  {new Date(w.startsAt).toLocaleString()} — {new Date(w.endsAt).toLocaleTimeString()}
+-                </p>
+-                <p className="text-xs text-text-secondary mt-1">{w.reason}</p>
+-              </div>
+-              <div className="flex items-center gap-3">
+-                <Badge tone={w.status === "Active" ? "warning" : "neutral"}>{w.status}</Badge>
+-                <button className="text-state-error text-sm font-medium hover:underline">Cancel</button>
+-              </div>
+-            </div>
+-          ))}
+-        </div>
+-      </Card>
+-
+-      <Card className="p-5 border-l-4 border-l-brand-accent">
+-        <SectionHeading title="Emergency force maintenance" description="Immediately blocks new sessions and warns all active users. Every action is logged to the audit trail." />
+-        <Button variant="danger">Force maintenance now</Button>
+-      </Card>
+-    </div>
+-  );
+-}
++export default function Maintenance(){const {data:windows,isLoading}=useMaintenanceWindows();const schedule=useScheduleMaintenanceWindow();const cancel=useCancelMaintenanceWindow();const [open,setOpen]=useState(false);const [start,setStart]=useState("");const [end,setEnd]=useState("");const [reason,setReason]=useState("");const submit=()=>schedule.mutate({startsAtUtc:new Date(start).toISOString(),endsAtUtc:new Date(end).toISOString(),reason},{onSuccess:()=>{setOpen(false);setStart("");setEnd("");setReason("")}});return <div className="space-y-6"><SectionHeading title="Maintenance" description="Schedule downtime windows; the system blocks exams that cannot finish before maintenance starts" action={<Button size="sm" onClick={()=>setOpen(v=>!v)}>Schedule window</Button>}/>{open&&<Card className="p-5 space-y-3"><div className="grid md:grid-cols-2 gap-3"><input type="datetime-local" value={start} onChange={e=>setStart(e.target.value)} className="h-11 px-3 border rounded-md"/><input type="datetime-local" value={end} onChange={e=>setEnd(e.target.value)} className="h-11 px-3 border rounded-md"/></div><input value={reason} onChange={e=>setReason(e.target.value)} placeholder="Reason" className="w-full h-11 px-3 border rounded-md"/><div className="flex gap-2"><Button onClick={submit} disabled={schedule.isPending||!start||!end||!reason.trim()}>Save window</Button><Button variant="secondary" onClick={()=>setOpen(false)}>Cancel</Button></div></Card>}<Card className="p-5"><SectionHeading title="Scheduled windows"/>{isLoading?<p>Loading...</p>:<div className="space-y-3">{windows?.map(w=><div key={w.id} className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 rounded-md bg-bg-alt"><div><p className="text-sm font-medium">{new Date(w.startsAt).toLocaleString()} — {new Date(w.endsAt).toLocaleString()}</p><p className="text-xs text-text-secondary mt-1">{w.reason}</p></div><div className="flex items-center gap-3"><Badge tone={w.status==="Active"?"warning":"neutral"}>{w.status}</Badge>{w.status!=="Cancelled"&&w.status!=="Completed"&&<Button size="sm" variant="danger" onClick={()=>cancel.mutate(w.id)} disabled={cancel.isPending}>Cancel</Button>}</div></div>)}{windows?.length===0&&<p className="text-sm text-text-secondary">No maintenance windows scheduled.</p>}</div>}</Card></div>}
+diff --git a/frontend/src/pages/admin/Users.tsx b/frontend/src/pages/admin/Users.tsx
+index 8809389..f64553a 100644
+--- a/frontend/src/pages/admin/Users.tsx
++++ b/frontend/src/pages/admin/Users.tsx
+@@ -1,4 +1,5 @@
+ import { useState } from "react";
++import { Link } from "react-router-dom";
+ import { useAdminUsers, useSetUserSuspended } from "../../hooks/useApiData";
+ import { Card, SectionHeading, Badge } from "../../components/ui/Primitives";
+ import { Button } from "../../components/ui/Button";
+@@ -12,7 +13,7 @@ export default function AdminUsers() {
+       <select value={role} onChange={e => setRole(e.target.value)} className="h-11 px-3 rounded-md border"><option value="">All roles</option><option>Learner</option><option>Administrator</option></select>
+       <select value={plan} onChange={e => setPlan(e.target.value)} className="h-11 px-3 rounded-md border"><option value="">All plans</option><option>Free</option><option>PremiumMonthly</option><option>PremiumYearly</option></select>
+       <select value={status} onChange={e => setStatus(e.target.value)} className="h-11 px-3 rounded-md border"><option value="">All statuses</option><option>Active</option><option>Suspended</option></select></Card>
+-    {isLoading ? <p>Loading users...</p> : isError ? <p className="text-state-error">Could not load users.</p> : <Card className="p-0 overflow-x-auto"><table className="w-full text-sm"><thead><tr className="text-left bg-bg-alt text-text-secondary"><th className="py-3 px-5">Name</th><th>Email</th><th>Role</th><th>Plan</th><th>Status</th><th>Action</th></tr></thead><tbody>{data?.items.map(u => <tr key={u.id} className="border-t"><td className="py-3 px-5 font-medium">{u.fullName}</td><td>{u.email}</td><td><Badge tone={u.role === "Administrator" ? "brand" : "neutral"}>{u.role}</Badge></td><td>{u.plan}</td><td><Badge tone={u.isSuspended ? "error" : "success"}>{u.isSuspended ? "Suspended" : "Active"}</Badge></td><td><Button size="sm" variant={u.isSuspended ? "primary" : "danger"} disabled={setSuspended.isPending} onClick={() => setSuspended.mutate({ id: u.id, suspended: !u.isSuspended })}>{u.isSuspended ? "Reactivate" : "Suspend"}</Button></td></tr>)}</tbody></table>
++    {isLoading ? <p>Loading users...</p> : isError ? <p className="text-state-error">Could not load users.</p> : <Card className="p-0 overflow-x-auto"><table className="w-full text-sm"><thead><tr className="text-left bg-bg-alt text-text-secondary"><th className="py-3 px-5">Name</th><th>Email</th><th>Role</th><th>Plan</th><th>Status</th><th>Action</th></tr></thead><tbody>{data?.items.map(u => <tr key={u.id} className="border-t"><td className="py-3 px-5 font-medium">{u.fullName}</td><td>{u.email}</td><td><Badge tone={u.role === "Administrator" ? "brand" : "neutral"}>{u.role}</Badge></td><td>{u.plan}</td><td><Badge tone={u.isSuspended ? "error" : "success"}>{u.isSuspended ? "Suspended" : "Active"}</Badge></td><td className="flex items-center gap-3"><Link to={`/admin/users/${u.id}`} className="text-brand-primary text-sm font-medium hover:underline">View</Link><Button size="sm" variant={u.isSuspended ? "primary" : "danger"} disabled={setSuspended.isPending} onClick={() => setSuspended.mutate({ id: u.id, suspended: !u.isSuspended })}>{u.isSuspended ? "Reactivate" : "Suspend"}</Button></td></tr>)}</tbody></table>
+       <div className="p-4 flex items-center justify-between"><span className="text-sm">{data?.totalCount ?? 0} users</span><div className="flex gap-2"><Button size="sm" variant="secondary" disabled={page <= 1} onClick={() => setPage(p => p - 1)}>Previous</Button><span>Page {page} of {data?.totalPages || 1}</span><Button size="sm" variant="secondary" disabled={page >= (data?.totalPages || 1)} onClick={() => setPage(p => p + 1)}>Next</Button></div></div></Card>}
+   </div>;
+ }
+diff --git a/frontend/src/types/index.ts b/frontend/src/types/index.ts
+index 705edcc..9cd44ee 100644
+--- a/frontend/src/types/index.ts
++++ b/frontend/src/types/index.ts
+@@ -79,6 +79,11 @@ export interface ExamSessionQuestion { id: string; topic: string; prompt: string
+ export interface ExamSession { attemptId: string; certificationId: string; certificationName: string; mode: "Practice" | "MockExam"; startedAtUtc: string; expiresAtUtc: string; serverTimeUtc: string; passingScorePercent: number; questions: ExamSessionQuestion[]; }
+ export interface PagedResult<T> { items: T[]; page: number; pageSize: number; totalCount: number; totalPages: number; }
+ export interface AdminUser { id: string; fullName: string; email: string; role: string; plan: string; isSuspended: boolean; createdAtUtc: string; }
++export interface AdminUserDetail extends AdminUser { emailConfirmed: boolean; premiumExpiresAtUtc?: string; studyStreakDays: number; lastActivityAtUtc?: string; completedAttempts: number; averageScore: number; }
++export interface AdminCertification { id: string; code: string; name: string; vendor: string; version: string; description: string; isActive: boolean; examDurationMinutes: number; passingScorePercent: number; mockExamQuestionCount: number; topicCount: number; questionCount: number; }
++export interface AdminResult { id: string; userId: string; userName: string; userEmail: string; certificationId: string; certificationName: string; mode: "Practice" | "MockExam"; startedAtUtc: string; completedAtUtc: string; durationSeconds: number; totalQuestions: number; correctCount: number; score: number; passed: boolean; }
++export interface AdminResultDetail { attempt: Omit<AdminResult, "certificationId"> & { certificationName: string }; answers: { questionId: string; prompt: string; isCorrect: boolean; selectedOptionId?: string; wasFlaggedForReview: boolean }[]; }
++export interface AdminQuestion { id: string; certificationId: string; certificationName: string; questionBankVersionId: string; topic: string; subtopic?: string; difficulty: string; prompt: string; explanation: string; reference?: string; questionType: string; status: "Draft" | "Published" | "Flagged"; options: { id: string; text: string; isCorrect: boolean; sortOrder: number }[]; }
+ export interface AuditLog { id: string; actorEmail: string; action: string; target?: string; level: string; createdAtUtc: string; }
+ export interface Payment { id: string; userEmail?: string; plan: string; amountZar: number; status: string; createdAtUtc: string; }
+ 
+diff --git a/frontend/src/pages/admin/Certifications.tsx b/frontend/src/pages/admin/Certifications.tsx
+new file mode 100644
+index 0000000..f186e15
+--- /dev/null
++++ b/frontend/src/pages/admin/Certifications.tsx
+@@ -0,0 +1,11 @@
++import { useState } from "react";
++import { useAdminCertifications, useUpdateAdminCertification } from "../../hooks/useApiData";
++import { Card, SectionHeading, Badge } from "../../components/ui/Primitives";
++import { Button } from "../../components/ui/Button";
++
++export default function AdminCertifications() {
++  const {data,isLoading}=useAdminCertifications(); const update=useUpdateAdminCertification(); const [editing,setEditing]=useState<string|null>(null); const [draft,setDraft]=useState<any>(null);
++  const begin=(c:any)=>{setEditing(c.id);setDraft({...c})};
++  const save=()=>update.mutate({id:editing!,data:{code:draft.code,name:draft.name,vendor:draft.vendor,version:draft.version,description:draft.description,isActive:draft.isActive,examDurationMinutes:Number(draft.examDurationMinutes),passingScorePercent:Number(draft.passingScorePercent),mockExamQuestionCount:Number(draft.mockExamQuestionCount)}},{onSuccess:()=>setEditing(null)});
++  return <div className="space-y-6"><SectionHeading title="Certifications" description="Manage certification metadata, availability, and mock-exam rules."/>{isLoading?<p>Loading certifications...</p>:<div className="space-y-4">{data?.map(c=>editing===c.id?<Card key={c.id} className="p-5 space-y-4"><div className="grid md:grid-cols-2 gap-3"><input value={draft.name} onChange={e=>setDraft((d:any)=>({...d,name:e.target.value}))} className="h-10 px-3 border rounded-md"/><input value={draft.code} onChange={e=>setDraft((d:any)=>({...d,code:e.target.value}))} className="h-10 px-3 border rounded-md"/><input value={draft.vendor} onChange={e=>setDraft((d:any)=>({...d,vendor:e.target.value}))} className="h-10 px-3 border rounded-md"/><input value={draft.version} onChange={e=>setDraft((d:any)=>({...d,version:e.target.value}))} className="h-10 px-3 border rounded-md"/><input type="number" value={draft.examDurationMinutes} onChange={e=>setDraft((d:any)=>({...d,examDurationMinutes:e.target.value}))} placeholder="Exam minutes" className="h-10 px-3 border rounded-md"/><input type="number" value={draft.passingScorePercent} onChange={e=>setDraft((d:any)=>({...d,passingScorePercent:e.target.value}))} placeholder="Passing %" className="h-10 px-3 border rounded-md"/><input type="number" value={draft.mockExamQuestionCount} onChange={e=>setDraft((d:any)=>({...d,mockExamQuestionCount:e.target.value}))} placeholder="Mock questions" className="h-10 px-3 border rounded-md"/></div><textarea value={draft.description} onChange={e=>setDraft((d:any)=>({...d,description:e.target.value}))} rows={3} className="w-full p-3 border rounded-md"/><label className="flex gap-2 items-center text-sm"><input type="checkbox" checked={draft.isActive} onChange={e=>setDraft((d:any)=>({...d,isActive:e.target.checked}))}/> Available to learners</label><div className="flex gap-2"><Button onClick={save} disabled={update.isPending}>Save</Button><Button variant="secondary" onClick={()=>setEditing(null)}>Cancel</Button></div></Card>:<Card key={c.id} className="p-5"><div className="flex flex-col md:flex-row md:items-center justify-between gap-4"><div><div className="flex items-center gap-2"><h3 className="font-semibold">{c.name}</h3><Badge tone={c.isActive?"success":"neutral"}>{c.isActive?"Active":"Inactive"}</Badge></div><p className="text-sm text-text-secondary mt-1">{c.vendor} · {c.code} · {c.version}</p><p className="text-xs text-text-secondary mt-2">{c.questionCount} published questions · {c.topicCount} topics · {c.examDurationMinutes} min · {c.passingScorePercent}% pass · {c.mockExamQuestionCount} mock questions</p></div><Button size="sm" variant="secondary" onClick={()=>begin(c)}>Edit</Button></div></Card>)}</div>}</div>;
++}
+diff --git a/frontend/src/pages/admin/Notifications.tsx b/frontend/src/pages/admin/Notifications.tsx
+new file mode 100644
+index 0000000..b36a9b9
+--- /dev/null
++++ b/frontend/src/pages/admin/Notifications.tsx
+@@ -0,0 +1,5 @@
++import { useState } from "react";
++import { useBroadcastNotification } from "../../hooks/useApiData";
++import { Card, SectionHeading } from "../../components/ui/Primitives";
++import { Button } from "../../components/ui/Button";
++export default function AdminNotifications(){const [title,setTitle]=useState("");const [body,setBody]=useState("");const [type,setType]=useState("General");const [message,setMessage]=useState("");const send=useBroadcastNotification();const submit=()=>{setMessage("");send.mutate({title,body,type},{onSuccess:r=>{setMessage(`Notification sent to ${r.recipients} learner(s).`);setTitle("");setBody("")},onError:(e:any)=>setMessage(e?.response?.data?.error??"Notification could not be sent.")})};return <div className="space-y-6"><SectionHeading title="Learner notifications" description="Send a notification to all active learner accounts."/><Card className="p-6 max-w-3xl space-y-4"><input value={title} onChange={e=>setTitle(e.target.value)} placeholder="Notification title" className="w-full h-11 px-3 border rounded-md"/><select value={type} onChange={e=>setType(e.target.value)} className="w-full h-11 px-3 border rounded-md"><option>General</option><option>ExamResult</option><option>Maintenance</option><option>Billing</option></select><textarea value={body} onChange={e=>setBody(e.target.value)} rows={6} placeholder="Message" className="w-full p-3 border rounded-md"/><Button onClick={submit} disabled={send.isPending||!title.trim()||!body.trim()}>{send.isPending?"Sending...":"Send notification"}</Button>{message&&<p className="text-sm">{message}</p>}</Card></div>}
+diff --git a/frontend/src/pages/admin/QuestionDetails.tsx b/frontend/src/pages/admin/QuestionDetails.tsx
+new file mode 100644
+index 0000000..1f82f48
+--- /dev/null
++++ b/frontend/src/pages/admin/QuestionDetails.tsx
+@@ -0,0 +1,22 @@
++import { useEffect, useState } from "react";
++import { Link, useParams } from "react-router-dom";
++import { useAdminQuestion, useUpdateAdminQuestion } from "../../hooks/useApiData";
++import { Card, SectionHeading, Badge } from "../../components/ui/Primitives";
++import { Button } from "../../components/ui/Button";
++
++export default function QuestionDetails() {
++  const {id}=useParams<{id:string}>(); const {data,isLoading}=useAdminQuestion(id); const update=useUpdateAdminQuestion(); const [draft,setDraft]=useState<any>(null);
++  useEffect(()=>{if(data)setDraft({topic:data.topic,subtopic:data.subtopic??"",difficulty:data.difficulty,prompt:data.prompt,explanation:data.explanation,reference:data.reference??"",questionType:data.questionType,status:data.status,options:data.options.map(o=>({...o}))})},[data]);
++  if(isLoading||!draft)return <p>Loading question...</p>;
++  const setOption=(i:number,patch:any)=>setDraft((d:any)=>({...d,options:d.options.map((o:any,j:number)=>j===i?{...o,...patch}:d.questionType==="Choice"&&patch.isCorrect?{...o,isCorrect:false}:o)}));
++  const save=()=>update.mutate({id:id!,data:draft});
++  return <div className="space-y-6"><SectionHeading title="Edit question" description={`${data?.certificationName} · ${data?.topic}`} action={<Link to="/admin/questions" className="text-sm font-semibold text-brand-primary hover:underline">Back to questions</Link>} />
++    <Card className="p-5 space-y-4"><div className="grid md:grid-cols-3 gap-3"><input value={draft.topic} onChange={e=>setDraft((d:any)=>({...d,topic:e.target.value}))} placeholder="Topic" className="h-10 px-3 border rounded-md"/><input value={draft.subtopic} onChange={e=>setDraft((d:any)=>({...d,subtopic:e.target.value}))} placeholder="Subtopic" className="h-10 px-3 border rounded-md"/><select value={draft.difficulty} onChange={e=>setDraft((d:any)=>({...d,difficulty:e.target.value}))} className="h-10 px-3 border rounded-md"><option>Easy</option><option>Medium</option><option>Hard</option></select></div>
++      <div className="grid md:grid-cols-2 gap-3"><select value={draft.questionType} onChange={e=>setDraft((d:any)=>({...d,questionType:e.target.value}))} className="h-10 px-3 border rounded-md"><option>Choice</option><option>MultipleResponse</option><option>Simulation</option></select><select value={draft.status} onChange={e=>setDraft((d:any)=>({...d,status:e.target.value}))} className="h-10 px-3 border rounded-md"><option>Published</option><option>Draft</option><option>Flagged</option></select></div>
++      <textarea rows={4} value={draft.prompt} onChange={e=>setDraft((d:any)=>({...d,prompt:e.target.value}))} className="w-full p-3 border rounded-md" placeholder="Question"/>
++      <div className="space-y-2">{draft.options.map((o:any,i:number)=><div key={o.id||i} className="flex gap-2 items-center"><input type={draft.questionType==="MultipleResponse"?"checkbox":"radio"} checked={o.isCorrect} onChange={e=>setOption(i,{isCorrect:e.target.checked})}/><input value={o.text} onChange={e=>setOption(i,{text:e.target.value})} className="flex-1 h-10 px-3 border rounded-md"/></div>)}</div>
++      <textarea rows={3} value={draft.explanation} onChange={e=>setDraft((d:any)=>({...d,explanation:e.target.value}))} className="w-full p-3 border rounded-md" placeholder="Explanation"/><input value={draft.reference} onChange={e=>setDraft((d:any)=>({...d,reference:e.target.value}))} placeholder="Reference" className="w-full h-10 px-3 border rounded-md"/>
++      <div className="flex items-center gap-3"><Button onClick={save} disabled={update.isPending}>{update.isPending?"Saving...":"Save changes"}</Button><Badge tone={draft.status==="Published"?"success":draft.status==="Flagged"?"warning":"neutral"}>{draft.status}</Badge></div>
++    </Card>
++  </div>;
++}
+diff --git a/frontend/src/pages/admin/Questions.tsx b/frontend/src/pages/admin/Questions.tsx
+new file mode 100644
+index 0000000..b4c3372
+--- /dev/null
++++ b/frontend/src/pages/admin/Questions.tsx
+@@ -0,0 +1,14 @@
++import { useState } from "react";
++import { Link } from "react-router-dom";
++import { useAdminCertifications, useAdminQuestions } from "../../hooks/useApiData";
++import { Card, SectionHeading, Badge } from "../../components/ui/Primitives";
++import { Button } from "../../components/ui/Button";
++
++export default function Questions() {
++  const [search,setSearch]=useState(""); const [certificationId,setCertificationId]=useState(""); const [status,setStatus]=useState(""); const [difficulty,setDifficulty]=useState(""); const [page,setPage]=useState(1);
++  const {data: certifications}=useAdminCertifications(); const {data,isLoading}=useAdminQuestions({search,certificationId,status,difficulty,page,pageSize:25});
++  return <div className="space-y-6"><SectionHeading title="Live question bank" description="Search and edit questions that are already published or staged in the live bank." />
++    <Card className="p-4 grid gap-3 md:grid-cols-4"><input value={search} onChange={e=>{setSearch(e.target.value);setPage(1)}} placeholder="Search question or topic" className="h-11 px-3 rounded-md border"/><select value={certificationId} onChange={e=>{setCertificationId(e.target.value);setPage(1)}} className="h-11 px-3 rounded-md border"><option value="">All certifications</option>{certifications?.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select><select value={status} onChange={e=>{setStatus(e.target.value);setPage(1)}} className="h-11 px-3 rounded-md border"><option value="">All statuses</option><option>Published</option><option>Draft</option><option>Flagged</option></select><select value={difficulty} onChange={e=>{setDifficulty(e.target.value);setPage(1)}} className="h-11 px-3 rounded-md border"><option value="">All difficulty</option><option>Easy</option><option>Medium</option><option>Hard</option></select></Card>
++    <Card className="p-0 overflow-x-auto">{isLoading?<p className="p-5">Loading questions...</p>:<><table className="w-full text-sm"><thead><tr className="text-left bg-bg-alt"><th className="p-3">Question</th><th>Certification</th><th>Topic</th><th>Difficulty</th><th>Status</th><th></th></tr></thead><tbody>{data?.items.map(q=><tr key={q.id} className="border-t"><td className="p-3 max-w-xl"><div className="font-medium truncate">{q.prompt}</div><div className="text-xs text-text-secondary">{q.questionType}</div></td><td>{q.certificationName}</td><td>{q.topic}</td><td>{q.difficulty}</td><td><Badge tone={q.status === "Published" ? "success" : q.status === "Flagged" ? "warning" : "neutral"}>{q.status}</Badge></td><td><Link to={`/admin/questions/${q.id}`} className="text-brand-primary font-medium hover:underline">Edit</Link></td></tr>)}{data?.items.length===0&&<tr><td colSpan={6} className="p-8 text-center text-text-secondary">No questions found.</td></tr>}</tbody></table><div className="p-4 flex justify-end items-center gap-2"><Button size="sm" variant="secondary" disabled={page<=1} onClick={()=>setPage(p=>p-1)}>Previous</Button><span className="text-sm">Page {page} of {data?.totalPages||1}</span><Button size="sm" variant="secondary" disabled={page>=(data?.totalPages||1)} onClick={()=>setPage(p=>p+1)}>Next</Button></div></>}</Card>
++  </div>;
++}
+diff --git a/frontend/src/pages/admin/ResultDetails.tsx b/frontend/src/pages/admin/ResultDetails.tsx
+new file mode 100644
+index 0000000..2246f62
+--- /dev/null
++++ b/frontend/src/pages/admin/ResultDetails.tsx
+@@ -0,0 +1,13 @@
++import { Link, useParams } from "react-router-dom";
++import { useAdminResult } from "../../hooks/useApiData";
++import { Card, SectionHeading, Badge } from "../../components/ui/Primitives";
++
++export default function ResultDetails() {
++  const { id } = useParams<{ id: string }>(); const { data, isLoading } = useAdminResult(id);
++  if (isLoading) return <p>Loading result...</p>; if (!data) return <p className="text-state-error">Result not found.</p>;
++  const a = data.attempt;
++  return <div className="space-y-6"><SectionHeading title="Result details" description={`${a.userName} · ${a.certificationName}`} action={<Link to="/admin/results" className="text-sm font-semibold text-brand-primary hover:underline">Back to results</Link>} />
++    <Card className="p-5 grid grid-cols-2 md:grid-cols-4 gap-4"><div><p className="text-xs text-text-secondary">Score</p><p className="text-2xl font-bold">{a.score}%</p></div><div><p className="text-xs text-text-secondary">Correct</p><p className="text-2xl font-bold">{a.correctCount}/{a.totalQuestions}</p></div><div><p className="text-xs text-text-secondary">Mode</p><p className="font-semibold mt-2">{a.mode}</p></div><div><p className="text-xs text-text-secondary">Outcome</p><div className="mt-2"><Badge tone={a.passed ? "success" : "error"}>{a.passed ? "Passed" : "Failed"}</Badge></div></div></Card>
++    <Card className="p-0 overflow-x-auto"><table className="w-full text-sm"><thead><tr className="text-left bg-bg-alt"><th className="p-3">Question</th><th>Correct</th><th>Flagged</th></tr></thead><tbody>{data.answers.map((q,i)=><tr key={`${q.questionId}-${i}`} className="border-t"><td className="p-3 max-w-3xl">{q.prompt}</td><td><Badge tone={q.isCorrect ? "success" : "error"}>{q.isCorrect ? "Correct" : "Incorrect"}</Badge></td><td>{q.wasFlaggedForReview ? "Yes" : "No"}</td></tr>)}</tbody></table></Card>
++  </div>;
++}
+diff --git a/frontend/src/pages/admin/Results.tsx b/frontend/src/pages/admin/Results.tsx
+new file mode 100644
+index 0000000..51dee75
+--- /dev/null
++++ b/frontend/src/pages/admin/Results.tsx
+@@ -0,0 +1,27 @@
++import { useState } from "react";
++import { Link } from "react-router-dom";
++import { useAdminCertifications, useAdminResults } from "../../hooks/useApiData";
++import { Card, SectionHeading, Badge } from "../../components/ui/Primitives";
++import { Button } from "../../components/ui/Button";
++
++export default function AdminResults() {
++  const [search, setSearch] = useState(""); const [certificationId, setCertificationId] = useState(""); const [mode, setMode] = useState(""); const [passed, setPassed] = useState(""); const [page, setPage] = useState(1);
++  const { data: certifications } = useAdminCertifications();
++  const { data, isLoading } = useAdminResults({ search, certificationId, mode, passed, page, pageSize: 25 });
++  return <div className="space-y-6">
++    <SectionHeading title="Learner results" description="Review completed practice sessions and mock exams." />
++    <Card className="p-4 grid gap-3 md:grid-cols-4">
++      <input value={search} onChange={e => { setSearch(e.target.value); setPage(1); }} placeholder="Learner name or email" className="h-11 px-3 rounded-md border" />
++      <select value={certificationId} onChange={e => { setCertificationId(e.target.value); setPage(1); }} className="h-11 px-3 rounded-md border"><option value="">All certifications</option>{certifications?.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select>
++      <select value={mode} onChange={e => { setMode(e.target.value); setPage(1); }} className="h-11 px-3 rounded-md border"><option value="">All modes</option><option value="Practice">Practice</option><option value="MockExam">Mock exam</option></select>
++      <select value={passed} onChange={e => { setPassed(e.target.value); setPage(1); }} className="h-11 px-3 rounded-md border"><option value="">All outcomes</option><option value="true">Passed</option><option value="false">Failed</option></select>
++    </Card>
++    <Card className="p-0 overflow-x-auto">{isLoading ? <p className="p-5">Loading results...</p> : <>
++      <table className="w-full text-sm"><thead><tr className="text-left bg-bg-alt"><th className="p-3">Learner</th><th>Certification</th><th>Mode</th><th>Score</th><th>Outcome</th><th>Completed</th><th></th></tr></thead><tbody>
++      {data?.items.map(r => <tr key={r.id} className="border-t"><td className="p-3"><div className="font-medium">{r.userName}</div><div className="text-xs text-text-secondary">{r.userEmail}</div></td><td>{r.certificationName}</td><td>{r.mode}</td><td className="font-semibold">{r.score}%</td><td><Badge tone={r.passed ? "success" : "error"}>{r.passed ? "Passed" : "Failed"}</Badge></td><td>{new Date(r.completedAtUtc).toLocaleString()}</td><td><Link className="text-brand-primary font-medium hover:underline" to={`/admin/results/${r.id}`}>View</Link></td></tr>)}
++      {data?.items.length === 0 && <tr><td colSpan={7} className="p-8 text-center text-text-secondary">No completed attempts found.</td></tr>}
++      </tbody></table>
++      <div className="p-4 flex items-center justify-between"><span>{data?.totalCount ?? 0} results</span><div className="flex gap-2"><Button size="sm" variant="secondary" disabled={page <= 1} onClick={() => setPage(p => p - 1)}>Previous</Button><span className="text-sm self-center">Page {page} of {data?.totalPages || 1}</span><Button size="sm" variant="secondary" disabled={page >= (data?.totalPages || 1)} onClick={() => setPage(p => p + 1)}>Next</Button></div></div>
++    </>}</Card>
++  </div>;
++}
+diff --git a/frontend/src/pages/admin/UserDetails.tsx b/frontend/src/pages/admin/UserDetails.tsx
+new file mode 100644
+index 0000000..db3cbcf
+--- /dev/null
++++ b/frontend/src/pages/admin/UserDetails.tsx
+@@ -0,0 +1,27 @@
++import { Link, useParams } from "react-router-dom";
++import { useAdminUser } from "../../hooks/useApiData";
++import { Card, SectionHeading, Badge } from "../../components/ui/Primitives";
++
++export default function UserDetails() {
++  const { id } = useParams<{ id: string }>();
++  const { data, isLoading, isError } = useAdminUser(id);
++  if (isLoading) return <p className="text-sm text-text-secondary">Loading user...</p>;
++  if (isError || !data) return <Card className="p-6"><p className="text-state-error">User could not be loaded.</p></Card>;
++  return <div className="space-y-6">
++    <SectionHeading title={data.fullName} description={data.email} action={<Link to="/admin/users" className="text-sm font-semibold text-brand-primary hover:underline">Back to users</Link>} />
++    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
++      <Card className="p-5"><p className="text-sm text-text-secondary">Role</p><p className="font-semibold mt-1">{data.role}</p></Card>
++      <Card className="p-5"><p className="text-sm text-text-secondary">Plan</p><p className="font-semibold mt-1">{data.plan}</p></Card>
++      <Card className="p-5"><p className="text-sm text-text-secondary">Status</p><div className="mt-1"><Badge tone={data.isSuspended ? "error" : "success"}>{data.isSuspended ? "Suspended" : "Active"}</Badge></div></Card>
++      <Card className="p-5"><p className="text-sm text-text-secondary">Completed attempts</p><p className="text-2xl font-bold mt-1">{data.completedAttempts}</p></Card>
++      <Card className="p-5"><p className="text-sm text-text-secondary">Average score</p><p className="text-2xl font-bold mt-1">{data.averageScore.toFixed(1)}%</p></Card>
++      <Card className="p-5"><p className="text-sm text-text-secondary">Study streak</p><p className="text-2xl font-bold mt-1">{data.studyStreakDays} days</p></Card>
++    </div>
++    <Card className="p-5 text-sm space-y-2">
++      <p><strong>Registered:</strong> {new Date(data.createdAtUtc).toLocaleString()}</p>
++      <p><strong>Email confirmed:</strong> {data.emailConfirmed ? "Yes" : "No"}</p>
++      <p><strong>Last activity:</strong> {data.lastActivityAtUtc ? new Date(data.lastActivityAtUtc).toLocaleString() : "Never"}</p>
++      <p><strong>Premium expiry:</strong> {data.premiumExpiresAtUtc ? new Date(data.premiumExpiresAtUtc).toLocaleString() : "—"}</p>
++    </Card>
++  </div>;
++}

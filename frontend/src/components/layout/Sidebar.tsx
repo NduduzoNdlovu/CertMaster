@@ -21,6 +21,7 @@ import {
   CreditCard,
   ScrollText,
   Flag,
+  FileQuestion,
 } from "lucide-react";
 import { useAuth } from "../../context/AuthContext";
 
@@ -47,11 +48,15 @@ const adminNav = [
   { to: "/admin", label: "Overview", icon: LayoutDashboard },
   { to: "/admin/users", label: "Users", icon: Users },
   { to: "/admin/question-banks", label: "Question Banks", icon: Database },
+  { to: "/admin/questions", label: "Questions", icon: FileQuestion },
+  { to: "/admin/certifications", label: "Certifications", icon: Award },
   { to: "/admin/reports", label: "Reported Questions", icon: Flag },
   { to: "/admin/analytics", label: "Analytics", icon: BarChart3 },
+  { to: "/admin/results", label: "Learner Results", icon: TrendingUp },
   { to: "/admin/maintenance", label: "Maintenance", icon: Wrench },
   { to: "/admin/payments", label: "Payments", icon: CreditCard },
   { to: "/admin/logs", label: "Logs", icon: ScrollText },
+  { to: "/admin/notifications", label: "Notifications", icon: Bell },
 ];
 
 export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {

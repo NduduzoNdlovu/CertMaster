@@ -30,6 +30,13 @@ import AdminReports from "./pages/admin/Reports";
 import Maintenance from "./pages/admin/Maintenance";
 import Payments from "./pages/admin/Payments";
 import Logs from "./pages/admin/Logs";
+import UserDetails from "./pages/admin/UserDetails";
+import AdminResults from "./pages/admin/Results";
+import ResultDetails from "./pages/admin/ResultDetails";
+import Questions from "./pages/admin/Questions";
+import QuestionDetails from "./pages/admin/QuestionDetails";
+import AdminCertifications from "./pages/admin/Certifications";
+import AdminNotifications from "./pages/admin/Notifications";
 
 export default function App() {
   return (
@@ -74,13 +81,20 @@ export default function App() {
         >
           <Route path="/admin" element={<AdminDashboard />} />
           <Route path="/admin/users" element={<AdminUsers />} />
+          <Route path="/admin/users/:id" element={<UserDetails />} />
           <Route path="/admin/question-banks" element={<QuestionBanks />} />
+          <Route path="/admin/questions" element={<Questions />} />
+          <Route path="/admin/questions/:id" element={<QuestionDetails />} />
+          <Route path="/admin/certifications" element={<AdminCertifications />} />
           <Route path="/admin/imports/:jobId" element={<ImportReview />} />
           <Route path="/admin/analytics" element={<AdminAnalytics />} />
+          <Route path="/admin/results" element={<AdminResults />} />
+          <Route path="/admin/results/:id" element={<ResultDetails />} />
           <Route path="/admin/reports" element={<AdminReports />} />
           <Route path="/admin/maintenance" element={<Maintenance />} />
           <Route path="/admin/payments" element={<Payments />} />
           <Route path="/admin/logs" element={<Logs />} />
+          <Route path="/admin/notifications" element={<AdminNotifications />} />
         </Route>
 
         <Route path="/" element={<Navigate to="/dashboard" replace />} />

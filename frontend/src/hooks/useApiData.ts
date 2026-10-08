@@ -23,7 +23,7 @@ import type {
   Question,
   QuestionReport,
   SearchResult,
-  ExamAttempt, ExamAttemptDetail, PagedResult, AdminUser, AuditLog, Payment, ExamSession,
+  ExamAttempt, ExamAttemptDetail, PagedResult, AdminUser, AdminUserDetail, AdminCertification, AdminResult, AdminResultDetail, AdminQuestion, AuditLog, Payment, ExamSession,
 } from "../types";
 
 const USE_MOCKS = import.meta.env.DEV && import.meta.env.VITE_USE_MOCKS === "true";
@@ -34,7 +34,7 @@ export function useAdminUsers(params: { search?: string; role?: string; plan?: s
   return useQuery<PagedResult<AdminUser>>({ queryKey: ["admin", "users", params], queryFn: async () => (await api.get("/admin/users", { params })).data });
 }
 export function useSetUserSuspended() { const qc = useQueryClient(); return useMutation({ mutationFn: async ({ id, suspended }: { id: string; suspended: boolean }) => api.post(`/admin/users/${id}/${suspended ? "suspend" : "reactivate"}`), onSuccess: () => qc.invalidateQueries({ queryKey: ["admin", "users"] }) }); }
-export function useAdminLogs(page = 1) { return useQuery<PagedResult<AuditLog>>({ queryKey: ["admin", "logs", page], queryFn: async () => (await api.get("/admin/logs", { params: { page } })).data }); }
+export function useAdminLogs(page = 1, search = "", level = "") { return useQuery<PagedResult<AuditLog>>({ queryKey: ["admin", "logs", page, search, level], queryFn: async () => (await api.get("/admin/logs", { params: { page, search: search || undefined, level: level || undefined } })).data }); }
 export function useAdminPayments() { return useQuery<Payment[]>({ queryKey: ["admin", "payments"], queryFn: async () => (await api.get("/admin/payments")).data }); }
 export function usePaymentSummary() { return useQuery<{ monthlyRevenue: number; activeSubscriptions: number; monthlyPlans: number; yearlyPlans: number }>({ queryKey: ["admin", "payment-summary"], queryFn: async () => (await api.get("/admin/payment-summary")).data }); }
 export function useAdminAnalytics() { return useQuery<{ questionAccuracyPercent: number; averageMockExamDurationMinutes: number; mostFailedTopic: string }>({ queryKey: ["admin", "analytics"], queryFn: async () => (await api.get("/admin/analytics")).data }); }
@@ -66,6 +66,45 @@ export function useCertifications() {
       return data;
     },
   });
+}
+
+export function useAdminUser(id?: string) {
+  return useQuery<AdminUserDetail>({ queryKey: ["admin", "user", id], queryFn: async () => (await api.get(`/admin/users/${id}`)).data, enabled: Boolean(id) });
+}
+export function useAdminCertifications() {
+  return useQuery<AdminCertification[]>({ queryKey: ["admin", "certifications"], queryFn: async () => (await api.get("/admin/certifications")).data });
+}
+export function useUpdateAdminCertification() {
+  const qc = useQueryClient();
+  return useMutation({ mutationFn: async ({ id, data }: { id: string; data: Omit<AdminCertification, "id" | "topicCount" | "questionCount"> }) => api.put(`/admin/certifications/${id}`, data), onSuccess: () => { qc.invalidateQueries({ queryKey: ["admin", "certifications"] }); qc.invalidateQueries({ queryKey: ["certifications"] }); } });
+}
+export function useAdminResults(params: { search?: string; certificationId?: string; mode?: string; passed?: string; page: number; pageSize: number }) {
+  return useQuery<PagedResult<AdminResult>>({ queryKey: ["admin", "results", params], queryFn: async () => (await api.get("/admin/results", { params: { ...params, passed: params.passed === "" ? undefined : params.passed } })).data });
+}
+export function useAdminResult(id?: string) {
+  return useQuery<AdminResultDetail>({ queryKey: ["admin", "result", id], queryFn: async () => (await api.get(`/admin/results/${id}`)).data, enabled: Boolean(id) });
+}
+export function useAdminQuestions(params: { search?: string; certificationId?: string; status?: string; difficulty?: string; page: number; pageSize: number }) {
+  return useQuery<PagedResult<AdminQuestion>>({ queryKey: ["admin", "questions", params], queryFn: async () => (await api.get("/admin/questions", { params })).data });
+}
+export function useAdminQuestion(id?: string) {
+  return useQuery<AdminQuestion>({ queryKey: ["admin", "question", id], queryFn: async () => (await api.get(`/admin/questions/${id}`)).data, enabled: Boolean(id) });
+}
+export function useUpdateAdminQuestion() {
+  const qc = useQueryClient();
+  return useMutation({ mutationFn: async ({ id, data }: { id: string; data: Omit<AdminQuestion, "id" | "certificationId" | "certificationName" | "questionBankVersionId"> }) => api.put(`/admin/questions/${id}`, data), onSuccess: (_, vars) => { qc.invalidateQueries({ queryKey: ["admin", "questions"] }); qc.invalidateQueries({ queryKey: ["admin", "question", vars.id] }); qc.invalidateQueries({ queryKey: ["questions"] }); } });
+}
+export function useBroadcastNotification() {
+  const qc = useQueryClient();
+  return useMutation({ mutationFn: async (data: { title: string; body: string; type: string; userIds?: string[] }) => (await api.post("/admin/notifications/broadcast", data)).data as { recipients: number }, onSuccess: () => qc.invalidateQueries({ queryKey: ["admin", "overview"] }) });
+}
+export function useScheduleMaintenanceWindow() {
+  const qc = useQueryClient();
+  return useMutation({ mutationFn: async (data: { startsAtUtc: string; endsAtUtc: string; reason: string }) => api.post("/admin/maintenance", data), onSuccess: () => qc.invalidateQueries({ queryKey: ["admin", "maintenance"] }) });
+}
+export function useCancelMaintenanceWindow() {
+  const qc = useQueryClient();
+  return useMutation({ mutationFn: async (id: string) => api.post(`/admin/maintenance/${id}/cancel`), onSuccess: () => qc.invalidateQueries({ queryKey: ["admin", "maintenance"] }) });
 }
 
 export function useAdminOverview() {
