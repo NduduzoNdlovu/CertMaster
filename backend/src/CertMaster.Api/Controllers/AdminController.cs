@@ -425,14 +425,9 @@ public class AdminController : ControllerBase
     }
 
     [HttpGet("analytics")]
-    public async Task<ActionResult> GetAnalytics(CancellationToken ct)
+    public async Task<ActionResult<AdminAnalyticsDto>> GetAnalytics(CancellationToken ct)
     {
-        var completed = _db.ExamAttempts.AsNoTracking().Where(a => a.CompletedAtUtc != null);
-        var accuracy = await completed.Select(a => (double?)a.Score).AverageAsync(ct) ?? 0;
-        var duration = await completed.Where(a => a.Mode == ExamMode.MockExam).Select(a => (double?)a.DurationSeconds).AverageAsync(ct) ?? 0;
-        var failedTopic = await _db.ExamAnswers.AsNoTracking().Where(a => !a.IsCorrect && a.Question != null)
-            .GroupBy(a => a.Question!.Topic).OrderByDescending(g => g.Count()).Select(g => g.Key).FirstOrDefaultAsync(ct);
-        return Ok(new { QuestionAccuracyPercent = Math.Round(accuracy, 1), AverageMockExamDurationMinutes = Math.Round(duration / 60, 1), MostFailedTopic = failedTopic ?? "No data" });
+        return Ok(await _adminService.GetAnalyticsAsync(ct));
     }
 
     public record UpdateExamRulesRequest(int ExamDurationMinutes, int PassingScorePercent, int MockExamQuestionCount);

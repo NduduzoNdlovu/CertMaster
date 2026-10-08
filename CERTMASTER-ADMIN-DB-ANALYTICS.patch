@@ -1,0 +1,1891 @@
+diff --git a/backend/src/CertMaster.Api/Controllers/AdminController.cs b/backend/src/CertMaster.Api/Controllers/AdminController.cs
+index df51f77..a2e8518 100644
+--- a/backend/src/CertMaster.Api/Controllers/AdminController.cs
++++ b/backend/src/CertMaster.Api/Controllers/AdminController.cs
+@@ -1,79 +1,79 @@
+-using CertMaster.Application.Common.Interfaces;
+-using CertMaster.Application.Features.Admin;
++using CertMaster.Application.Common.Interfaces;
++using CertMaster.Application.Features.Admin;
+ using CertMaster.Application.Features.Certifications;
+ using CertMaster.Application.Features.Notifications;
+-using CertMaster.Domain.Entities;
+-using CertMaster.Domain.Enums;
+-using Microsoft.AspNetCore.Authorization;
+-using Microsoft.AspNetCore.Mvc;
+-using Microsoft.EntityFrameworkCore;
+-
+-namespace CertMaster.Api.Controllers;
+-
+-[ApiController]
+-[Authorize(Roles = "Administrator")]
+-[Route("api/admin")]
+-public class AdminController : ControllerBase
+-{
+-    private readonly AdminService _adminService;
+-    private readonly IApplicationDbContext _db;
+-    private readonly ICurrentUserService _currentUser;
++using CertMaster.Domain.Entities;
++using CertMaster.Domain.Enums;
++using Microsoft.AspNetCore.Authorization;
++using Microsoft.AspNetCore.Mvc;
++using Microsoft.EntityFrameworkCore;
++
++namespace CertMaster.Api.Controllers;
++
++[ApiController]
++[Authorize(Roles = "Administrator")]
++[Route("api/admin")]
++public class AdminController : ControllerBase
++{
++    private readonly AdminService _adminService;
++    private readonly IApplicationDbContext _db;
++    private readonly ICurrentUserService _currentUser;
+     private readonly CertificationService _certificationService;
+-
++
+     public AdminController(AdminService adminService, IApplicationDbContext db, ICurrentUserService currentUser, CertificationService certificationService)
+-    {
+-        _adminService = adminService;
+-        _db = db;
+-        _currentUser = currentUser;
++    {
++        _adminService = adminService;
++        _db = db;
++        _currentUser = currentUser;
+         _certificationService = certificationService;
+-    }
+-
+-    [HttpGet("overview")]
+-    public async Task<ActionResult<AdminOverviewDto>> GetOverview(CancellationToken ct)
+-    {
+-        return Ok(await _adminService.GetOverviewAsync(ct));
+-    }
+-
+-    [HttpGet("users")]
+-    public async Task<ActionResult> GetUsers([FromQuery] string? search, [FromQuery] string? role,
+-        [FromQuery] string? plan, [FromQuery] string? status, [FromQuery] int page = 1,
+-        [FromQuery] int pageSize = 25, CancellationToken ct = default)
+-    {
+-        page = Math.Max(1, page);
+-        pageSize = Math.Clamp(pageSize, 1, 100);
+-        var query = _db.Users.AsNoTracking().AsQueryable();
+-
+-        if (!string.IsNullOrWhiteSpace(search))
+-        {
+-            var term = search.Trim().ToLowerInvariant();
+-            query = query.Where(u => u.FullName.ToLower().Contains(term) || u.Email.ToLower().Contains(term));
+-        }
+-
+-        if (Enum.TryParse<UserRole>(role, true, out var parsedRole)) query = query.Where(u => u.Role == parsedRole);
+-        if (Enum.TryParse<SubscriptionPlan>(plan, true, out var parsedPlan)) query = query.Where(u => u.Plan == parsedPlan);
+-        if (string.Equals(status, "Active", StringComparison.OrdinalIgnoreCase)) query = query.Where(u => !u.IsSuspended);
+-        if (string.Equals(status, "Suspended", StringComparison.OrdinalIgnoreCase)) query = query.Where(u => u.IsSuspended);
+-
+-        var totalCount = await query.CountAsync(ct);
+-
+-        var users = await query
+-            .OrderByDescending(u => u.CreatedAtUtc)
+-            .Skip((page - 1) * pageSize).Take(pageSize)
+-            .Select(u => new
+-            {
+-                u.Id,
+-                u.FullName,
+-                u.Email,
+-                Role = u.Role.ToString(),
+-                Plan = u.Plan.ToString(),
+-                u.IsSuspended,
+-                u.CreatedAtUtc,
+-            })
+-            .ToListAsync(ct);
+-
+-        return Ok(new { items = users, page, pageSize, totalCount, totalPages = (int)Math.Ceiling(totalCount / (double)pageSize) });
+-    }
+-
++    }
++
++    [HttpGet("overview")]
++    public async Task<ActionResult<AdminOverviewDto>> GetOverview(CancellationToken ct)
++    {
++        return Ok(await _adminService.GetOverviewAsync(ct));
++    }
++
++    [HttpGet("users")]
++    public async Task<ActionResult> GetUsers([FromQuery] string? search, [FromQuery] string? role,
++        [FromQuery] string? plan, [FromQuery] string? status, [FromQuery] int page = 1,
++        [FromQuery] int pageSize = 25, CancellationToken ct = default)
++    {
++        page = Math.Max(1, page);
++        pageSize = Math.Clamp(pageSize, 1, 100);
++        var query = _db.Users.AsNoTracking().AsQueryable();
++
++        if (!string.IsNullOrWhiteSpace(search))
++        {
++            var term = search.Trim().ToLowerInvariant();
++            query = query.Where(u => u.FullName.ToLower().Contains(term) || u.Email.ToLower().Contains(term));
++        }
++
++        if (Enum.TryParse<UserRole>(role, true, out var parsedRole)) query = query.Where(u => u.Role == parsedRole);
++        if (Enum.TryParse<SubscriptionPlan>(plan, true, out var parsedPlan)) query = query.Where(u => u.Plan == parsedPlan);
++        if (string.Equals(status, "Active", StringComparison.OrdinalIgnoreCase)) query = query.Where(u => !u.IsSuspended);
++        if (string.Equals(status, "Suspended", StringComparison.OrdinalIgnoreCase)) query = query.Where(u => u.IsSuspended);
++
++        var totalCount = await query.CountAsync(ct);
++
++        var users = await query
++            .OrderByDescending(u => u.CreatedAtUtc)
++            .Skip((page - 1) * pageSize).Take(pageSize)
++            .Select(u => new
++            {
++                u.Id,
++                u.FullName,
++                u.Email,
++                Role = u.Role.ToString(),
++                Plan = u.Plan.ToString(),
++                u.IsSuspended,
++                u.CreatedAtUtc,
++            })
++            .ToListAsync(ct);
++
++        return Ok(new { items = users, page, pageSize, totalCount, totalPages = (int)Math.Ceiling(totalCount / (double)pageSize) });
++    }
++
+     [HttpGet("certifications")]
+     public async Task<ActionResult> GetCertifications(CancellationToken ct)
+     {
+@@ -127,52 +127,52 @@ public class AdminController : ControllerBase
+         return NoContent();
+     }
+ 
+-    [HttpGet("users/{id:guid}")]
+-    public async Task<ActionResult> GetUser(Guid id, CancellationToken ct)
+-    {
+-        var user = await _db.Users.AsNoTracking().Where(u => u.Id == id).Select(u => new
+-        {
+-            u.Id, u.FullName, u.Email, Role = u.Role.ToString(), Plan = u.Plan.ToString(), u.IsSuspended,
+-            u.EmailConfirmed, u.PremiumExpiresAtUtc, u.StudyStreakDays, u.LastActivityAtUtc, u.CreatedAtUtc,
+-            CompletedAttempts = u.ExamAttempts.Count(a => a.CompletedAtUtc != null),
+-            AverageScore = u.ExamAttempts.Where(a => a.CompletedAtUtc != null).Select(a => (double?)a.Score).Average() ?? 0
+-        }).FirstOrDefaultAsync(ct);
+-        return user is null ? NotFound() : Ok(user);
+-    }
+-
+-    [HttpPost("users/{id:guid}/suspend")]
+-    public async Task<ActionResult> SuspendUser(Guid id, CancellationToken ct)
+-    {
+-        var user = await _db.Users.FirstOrDefaultAsync(u => u.Id == id, ct);
+-        if (user is null) return NotFound();
+-
+-        user.IsSuspended = true;
+-        await _db.SaveChangesAsync(ct);
+-
+-        _db.AuditLogEntries.Add(new AuditLogEntry
+-        {
+-            ActorEmail = _currentUser.Email ?? "unknown",
+-            Action = "Suspended user account",
+-            Target = user.Email,
+-            Level = "Warning",
+-        });
+-        await _db.SaveChangesAsync(ct);
+-
+-        return NoContent();
+-    }
+-
+-    [HttpPost("users/{id:guid}/reactivate")]
+-    public async Task<ActionResult> ReactivateUser(Guid id, CancellationToken ct)
+-    {
+-        var user = await _db.Users.FirstOrDefaultAsync(u => u.Id == id, ct);
+-        if (user is null) return NotFound();
+-        user.IsSuspended = false;
+-        _db.AuditLogEntries.Add(new AuditLogEntry { ActorEmail = _currentUser.Email ?? "unknown",
+-            Action = "Reactivated user account", Target = user.Email, Level = "Info" });
+-        await _db.SaveChangesAsync(ct);
+-        return NoContent();
+-    }
+-
++    [HttpGet("users/{id:guid}")]
++    public async Task<ActionResult> GetUser(Guid id, CancellationToken ct)
++    {
++        var user = await _db.Users.AsNoTracking().Where(u => u.Id == id).Select(u => new
++        {
++            u.Id, u.FullName, u.Email, Role = u.Role.ToString(), Plan = u.Plan.ToString(), u.IsSuspended,
++            u.EmailConfirmed, u.PremiumExpiresAtUtc, u.StudyStreakDays, u.LastActivityAtUtc, u.CreatedAtUtc,
++            CompletedAttempts = u.ExamAttempts.Count(a => a.CompletedAtUtc != null),
++            AverageScore = u.ExamAttempts.Where(a => a.CompletedAtUtc != null).Select(a => (double?)a.Score).Average() ?? 0
++        }).FirstOrDefaultAsync(ct);
++        return user is null ? NotFound() : Ok(user);
++    }
++
++    [HttpPost("users/{id:guid}/suspend")]
++    public async Task<ActionResult> SuspendUser(Guid id, CancellationToken ct)
++    {
++        var user = await _db.Users.FirstOrDefaultAsync(u => u.Id == id, ct);
++        if (user is null) return NotFound();
++
++        user.IsSuspended = true;
++        await _db.SaveChangesAsync(ct);
++
++        _db.AuditLogEntries.Add(new AuditLogEntry
++        {
++            ActorEmail = _currentUser.Email ?? "unknown",
++            Action = "Suspended user account",
++            Target = user.Email,
++            Level = "Warning",
++        });
++        await _db.SaveChangesAsync(ct);
++
++        return NoContent();
++    }
++
++    [HttpPost("users/{id:guid}/reactivate")]
++    public async Task<ActionResult> ReactivateUser(Guid id, CancellationToken ct)
++    {
++        var user = await _db.Users.FirstOrDefaultAsync(u => u.Id == id, ct);
++        if (user is null) return NotFound();
++        user.IsSuspended = false;
++        _db.AuditLogEntries.Add(new AuditLogEntry { ActorEmail = _currentUser.Email ?? "unknown",
++            Action = "Reactivated user account", Target = user.Email, Level = "Info" });
++        await _db.SaveChangesAsync(ct);
++        return NoContent();
++    }
++
+     [HttpGet("results")]
+     public async Task<ActionResult> GetResults(
+         [FromQuery] string? search, [FromQuery] Guid? certificationId, [FromQuery] string? mode,
+@@ -312,143 +312,138 @@ public class AdminController : ControllerBase
+         return Ok(new { recipients = userIds.Count });
+     }
+ 
+-    [HttpGet("maintenance")]
+-    public async Task<ActionResult> GetMaintenanceWindows(CancellationToken ct)
+-    {
+-        var windows = await _db.MaintenanceWindows
+-            .OrderBy(w => w.StartsAtUtc)
+-            .Select(w => new
+-            {
+-                w.Id,
+-                w.StartsAtUtc,
+-                w.EndsAtUtc,
+-                w.Reason,
+-                Status = w.Status.ToString(),
+-            })
+-            .ToListAsync(ct);
+-
+-        return Ok(windows);
+-    }
+-
+-    public record CreateMaintenanceWindowRequest(DateTime StartsAtUtc, DateTime EndsAtUtc, string Reason);
+-
+-    [HttpPost("maintenance")]
+-    public async Task<ActionResult> ScheduleMaintenanceWindow(CreateMaintenanceWindowRequest request, CancellationToken ct)
+-    {
+-        if (request.EndsAtUtc <= request.StartsAtUtc)
+-        {
+-            return BadRequest(new { error = "End time must be after the start time." });
+-        }
+-
+-        var window = new MaintenanceWindow
+-        {
+-            StartsAtUtc = request.StartsAtUtc,
+-            EndsAtUtc = request.EndsAtUtc,
+-            Reason = request.Reason,
+-            Status = MaintenanceStatus.Scheduled,
+-            CreatedByUserId = _currentUser.UserId?.ToString() ?? string.Empty,
+-        };
+-
+-        _db.MaintenanceWindows.Add(window);
+-
+-        _db.AuditLogEntries.Add(new AuditLogEntry
+-        {
+-            ActorEmail = _currentUser.Email ?? "unknown",
+-            Action = "Scheduled maintenance window",
+-            Target = $"{request.StartsAtUtc:u} - {request.EndsAtUtc:u}",
+-            Level = "Info",
+-        });
+-
+-        await _db.SaveChangesAsync(ct);
+-
+-        return Ok(new { window.Id });
+-    }
+-
+-    [HttpPost("maintenance/{id:guid}/cancel")]
+-    public async Task<ActionResult> CancelMaintenanceWindow(Guid id, CancellationToken ct)
+-    {
+-        var window = await _db.MaintenanceWindows.FirstOrDefaultAsync(w => w.Id == id, ct);
+-        if (window is null) return NotFound();
+-
+-        window.Status = MaintenanceStatus.Cancelled;
+-        await _db.SaveChangesAsync(ct);
+-
+-        return NoContent();
+-    }
+-
+-    [HttpGet("logs")]
+-    public async Task<ActionResult> GetAuditLogs([FromQuery] string? search, [FromQuery] string? level,
+-        [FromQuery] int page = 1, [FromQuery] int pageSize = 25, CancellationToken ct = default)
+-    {
+-        page = Math.Max(1, page); pageSize = Math.Clamp(pageSize, 1, 100);
+-        var query = _db.AuditLogEntries.AsNoTracking().AsQueryable();
+-        if (!string.IsNullOrWhiteSpace(search)) query = query.Where(l => l.ActorEmail.Contains(search) || l.Action.Contains(search) || l.Target.Contains(search));
+-        if (!string.IsNullOrWhiteSpace(level)) query = query.Where(l => l.Level == level);
+-        var totalCount = await query.CountAsync(ct);
+-        var items = await query.OrderByDescending(l => l.CreatedAtUtc).Skip((page - 1) * pageSize).Take(pageSize).ToListAsync(ct);
+-        return Ok(new { items, page, pageSize, totalCount, totalPages = (int)Math.Ceiling(totalCount / (double)pageSize) });
+-    }
+-
+-    [HttpGet("payments")]
+-    public async Task<ActionResult> GetPayments(CancellationToken ct)
+-    {
+-        var payments = await _db.PaymentTransactions
+-            .Include(p => p.User)
+-            .OrderByDescending(p => p.CreatedAtUtc)
+-            .Take(200)
+-            .Select(p => new
+-            {
+-                p.Id,
+-                UserEmail = p.User != null ? p.User.Email : null,
+-                Plan = p.Plan.ToString(),
+-                p.AmountZar,
+-                p.Status,
+-                p.CreatedAtUtc,
+-            })
+-            .ToListAsync(ct);
+-
+-        return Ok(payments);
+-    }
+-
+-    [HttpGet("payment-summary")]
+-    public async Task<ActionResult> GetPaymentSummary(CancellationToken ct)
+-    {
+-        var monthStart = new DateTime(DateTime.UtcNow.Year, DateTime.UtcNow.Month, 1, 0, 0, 0, DateTimeKind.Utc);
+-        var paid = _db.PaymentTransactions.AsNoTracking().Where(p => p.Status == "Paid");
+-        return Ok(new
+-        {
+-            MonthlyRevenue = await paid.Where(p => p.CreatedAtUtc >= monthStart).SumAsync(p => p.AmountZar, ct),
+-            ActiveSubscriptions = await _db.Users.CountAsync(u => u.Plan != SubscriptionPlan.Free && !u.IsSuspended, ct),
+-            MonthlyPlans = await _db.Users.CountAsync(u => u.Plan == SubscriptionPlan.PremiumMonthly && !u.IsSuspended, ct),
+-            YearlyPlans = await _db.Users.CountAsync(u => u.Plan == SubscriptionPlan.PremiumYearly && !u.IsSuspended, ct)
+-        });
+-    }
+-
+-    [HttpGet("analytics")]
+-    public async Task<ActionResult> GetAnalytics(CancellationToken ct)
+-    {
+-        var completed = _db.ExamAttempts.AsNoTracking().Where(a => a.CompletedAtUtc != null);
+-        var accuracy = await completed.Select(a => (double?)a.Score).AverageAsync(ct) ?? 0;
+-        var duration = await completed.Where(a => a.Mode == ExamMode.MockExam).Select(a => (double?)a.DurationSeconds).AverageAsync(ct) ?? 0;
+-        var failedTopic = await _db.ExamAnswers.AsNoTracking().Where(a => !a.IsCorrect && a.Question != null)
+-            .GroupBy(a => a.Question!.Topic).OrderByDescending(g => g.Count()).Select(g => g.Key).FirstOrDefaultAsync(ct);
+-        return Ok(new { QuestionAccuracyPercent = Math.Round(accuracy, 1), AverageMockExamDurationMinutes = Math.Round(duration / 60, 1), MostFailedTopic = failedTopic ?? "No data" });
+-    }
+-
+-    public record UpdateExamRulesRequest(int ExamDurationMinutes, int PassingScorePercent, int MockExamQuestionCount);
+-
+-    [HttpPut("certifications/{id:guid}/exam-rules")]
+-    public async Task<ActionResult> UpdateExamRules(Guid id, UpdateExamRulesRequest request, CancellationToken ct)
+-    {
+-        if (request.ExamDurationMinutes is < 1 or > 480 || request.PassingScorePercent is < 1 or > 100 || request.MockExamQuestionCount is < 1 or > 500)
+-            return BadRequest(new { error = "Duration must be 1-480 minutes, pass mark 1-100, and question count 1-500." });
+-        var certification = await _db.Certifications.FirstOrDefaultAsync(c => c.Id == id, ct);
+-        if (certification is null) return NotFound();
+-        certification.ExamDurationMinutes = request.ExamDurationMinutes;
+-        certification.PassingScorePercent = request.PassingScorePercent;
+-        certification.MockExamQuestionCount = request.MockExamQuestionCount;
+-        _db.AuditLogEntries.Add(new AuditLogEntry { ActorEmail = _currentUser.Email ?? "unknown", Action = "Updated certification exam rules", Target = certification.Code, Level = "Info" });
+-        await _db.SaveChangesAsync(ct);
+-        return NoContent();
+-    }
+-}
++    [HttpGet("maintenance")]
++    public async Task<ActionResult> GetMaintenanceWindows(CancellationToken ct)
++    {
++        var windows = await _db.MaintenanceWindows
++            .OrderBy(w => w.StartsAtUtc)
++            .Select(w => new
++            {
++                w.Id,
++                w.StartsAtUtc,
++                w.EndsAtUtc,
++                w.Reason,
++                Status = w.Status.ToString(),
++            })
++            .ToListAsync(ct);
++
++        return Ok(windows);
++    }
++
++    public record CreateMaintenanceWindowRequest(DateTime StartsAtUtc, DateTime EndsAtUtc, string Reason);
++
++    [HttpPost("maintenance")]
++    public async Task<ActionResult> ScheduleMaintenanceWindow(CreateMaintenanceWindowRequest request, CancellationToken ct)
++    {
++        if (request.EndsAtUtc <= request.StartsAtUtc)
++        {
++            return BadRequest(new { error = "End time must be after the start time." });
++        }
++
++        var window = new MaintenanceWindow
++        {
++            StartsAtUtc = request.StartsAtUtc,
++            EndsAtUtc = request.EndsAtUtc,
++            Reason = request.Reason,
++            Status = MaintenanceStatus.Scheduled,
++            CreatedByUserId = _currentUser.UserId?.ToString() ?? string.Empty,
++        };
++
++        _db.MaintenanceWindows.Add(window);
++
++        _db.AuditLogEntries.Add(new AuditLogEntry
++        {
++            ActorEmail = _currentUser.Email ?? "unknown",
++            Action = "Scheduled maintenance window",
++            Target = $"{request.StartsAtUtc:u} - {request.EndsAtUtc:u}",
++            Level = "Info",
++        });
++
++        await _db.SaveChangesAsync(ct);
++
++        return Ok(new { window.Id });
++    }
++
++    [HttpPost("maintenance/{id:guid}/cancel")]
++    public async Task<ActionResult> CancelMaintenanceWindow(Guid id, CancellationToken ct)
++    {
++        var window = await _db.MaintenanceWindows.FirstOrDefaultAsync(w => w.Id == id, ct);
++        if (window is null) return NotFound();
++
++        window.Status = MaintenanceStatus.Cancelled;
++        await _db.SaveChangesAsync(ct);
++
++        return NoContent();
++    }
++
++    [HttpGet("logs")]
++    public async Task<ActionResult> GetAuditLogs([FromQuery] string? search, [FromQuery] string? level,
++        [FromQuery] int page = 1, [FromQuery] int pageSize = 25, CancellationToken ct = default)
++    {
++        page = Math.Max(1, page); pageSize = Math.Clamp(pageSize, 1, 100);
++        var query = _db.AuditLogEntries.AsNoTracking().AsQueryable();
++        if (!string.IsNullOrWhiteSpace(search)) query = query.Where(l => l.ActorEmail.Contains(search) || l.Action.Contains(search) || l.Target.Contains(search));
++        if (!string.IsNullOrWhiteSpace(level)) query = query.Where(l => l.Level == level);
++        var totalCount = await query.CountAsync(ct);
++        var items = await query.OrderByDescending(l => l.CreatedAtUtc).Skip((page - 1) * pageSize).Take(pageSize).ToListAsync(ct);
++        return Ok(new { items, page, pageSize, totalCount, totalPages = (int)Math.Ceiling(totalCount / (double)pageSize) });
++    }
++
++    [HttpGet("payments")]
++    public async Task<ActionResult> GetPayments(CancellationToken ct)
++    {
++        var payments = await _db.PaymentTransactions
++            .Include(p => p.User)
++            .OrderByDescending(p => p.CreatedAtUtc)
++            .Take(200)
++            .Select(p => new
++            {
++                p.Id,
++                UserEmail = p.User != null ? p.User.Email : null,
++                Plan = p.Plan.ToString(),
++                p.AmountZar,
++                p.Status,
++                p.CreatedAtUtc,
++            })
++            .ToListAsync(ct);
++
++        return Ok(payments);
++    }
++
++    [HttpGet("payment-summary")]
++    public async Task<ActionResult> GetPaymentSummary(CancellationToken ct)
++    {
++        var monthStart = new DateTime(DateTime.UtcNow.Year, DateTime.UtcNow.Month, 1, 0, 0, 0, DateTimeKind.Utc);
++        var paid = _db.PaymentTransactions.AsNoTracking().Where(p => p.Status == "Paid");
++        return Ok(new
++        {
++            MonthlyRevenue = await paid.Where(p => p.CreatedAtUtc >= monthStart).SumAsync(p => p.AmountZar, ct),
++            ActiveSubscriptions = await _db.Users.CountAsync(u => u.Plan != SubscriptionPlan.Free && !u.IsSuspended, ct),
++            MonthlyPlans = await _db.Users.CountAsync(u => u.Plan == SubscriptionPlan.PremiumMonthly && !u.IsSuspended, ct),
++            YearlyPlans = await _db.Users.CountAsync(u => u.Plan == SubscriptionPlan.PremiumYearly && !u.IsSuspended, ct)
++        });
++    }
++
++    [HttpGet("analytics")]
++    public async Task<ActionResult<AdminAnalyticsDto>> GetAnalytics(CancellationToken ct)
++    {
++        return Ok(await _adminService.GetAnalyticsAsync(ct));
++    }
++
++    public record UpdateExamRulesRequest(int ExamDurationMinutes, int PassingScorePercent, int MockExamQuestionCount);
++
++    [HttpPut("certifications/{id:guid}/exam-rules")]
++    public async Task<ActionResult> UpdateExamRules(Guid id, UpdateExamRulesRequest request, CancellationToken ct)
++    {
++        if (request.ExamDurationMinutes is < 1 or > 480 || request.PassingScorePercent is < 1 or > 100 || request.MockExamQuestionCount is < 1 or > 500)
++            return BadRequest(new { error = "Duration must be 1-480 minutes, pass mark 1-100, and question count 1-500." });
++        var certification = await _db.Certifications.FirstOrDefaultAsync(c => c.Id == id, ct);
++        if (certification is null) return NotFound();
++        certification.ExamDurationMinutes = request.ExamDurationMinutes;
++        certification.PassingScorePercent = request.PassingScorePercent;
++        certification.MockExamQuestionCount = request.MockExamQuestionCount;
++        _db.AuditLogEntries.Add(new AuditLogEntry { ActorEmail = _currentUser.Email ?? "unknown", Action = "Updated certification exam rules", Target = certification.Code, Level = "Info" });
++        await _db.SaveChangesAsync(ct);
++        return NoContent();
++    }
++}
+diff --git a/backend/src/CertMaster.Application/Features/Admin/AdminService.cs b/backend/src/CertMaster.Application/Features/Admin/AdminService.cs
+index d0e4297..cf04cca 100644
+--- a/backend/src/CertMaster.Application/Features/Admin/AdminService.cs
++++ b/backend/src/CertMaster.Application/Features/Admin/AdminService.cs
+@@ -1,122 +1,272 @@
+-using CertMaster.Application.Common.Interfaces;
+-using CertMaster.Domain.Enums;
+-using Microsoft.EntityFrameworkCore;
+-
+-namespace CertMaster.Application.Features.Admin;
+-
+-public record RegistrationByDayDto(string Date, int Count);
+-
+-public record SystemStatusDto(
+-    string Database,
+-    string Api,
+-    string BackgroundJobs);
+-
+-public record AdminOverviewDto(
+-    int TotalUsers,
+-    int PremiumUsers,
+-    int ActiveUsersToday,
+-    int UsersOnlineNow,
+-    int UsersTakingExamsNow,
+-    int PracticeSessionsRunning,
+-    decimal MonthlyRevenue,
+-    decimal MonthlyGrowthPercent,
+-    string MostPopularCertification,
+-    List<RegistrationByDayDto> RegistrationsByDay,
+-    SystemStatusDto SystemStatus);
+-
+-public class AdminService
+-{
+-    private readonly IApplicationDbContext _db;
+-    private readonly IDateTimeProvider _clock;
+-
+-    public AdminService(IApplicationDbContext db, IDateTimeProvider clock)
+-    {
+-        _db = db;
+-        _clock = clock;
+-    }
+-
+-    public async Task<AdminOverviewDto> GetOverviewAsync(CancellationToken ct)
+-    {
+-        var now = _clock.UtcNow;
+-        var today = now.Date;
+-        var onlineCutoff = now.AddMinutes(-5);
+-        var currentPeriodStart = now.AddDays(-30);
+-        var previousPeriodStart = now.AddDays(-60);
+-        var registrationStart = today.AddDays(-6);
+-
+-        var totalUsers = await _db.Users.CountAsync(ct);
+-        var premiumUsers = await _db.Users.CountAsync(u => u.Plan != SubscriptionPlan.Free, ct);
+-        var activeToday = await _db.Users.CountAsync(u => u.LastActivityAtUtc >= today, ct);
+-        var usersOnlineNow = await _db.Users.CountAsync(u => u.LastActivityAtUtc >= onlineCutoff, ct);
+-
+-        var usersTakingExamsNow = await _db.ExamAttempts
+-            .Where(a => a.CompletedAtUtc == null)
+-            .Select(a => a.UserId)
+-            .Distinct()
+-            .CountAsync(ct);
+-
+-        var practiceSessionsRunning = await _db.ExamAttempts.CountAsync(
+-            a => a.CompletedAtUtc == null && a.Mode == ExamMode.Practice,
+-            ct);
+-
+-        var monthlyRevenue = await _db.PaymentTransactions
+-            .Where(p => p.Status == "Paid" && p.CreatedAtUtc >= currentPeriodStart)
+-            .SumAsync(p => (decimal?)p.AmountZar, ct) ?? 0;
+-
+-        var previousMonthlyRevenue = await _db.PaymentTransactions
+-            .Where(p => p.Status == "Paid" &&
+-                        p.CreatedAtUtc >= previousPeriodStart &&
+-                        p.CreatedAtUtc < currentPeriodStart)
+-            .SumAsync(p => (decimal?)p.AmountZar, ct) ?? 0;
+-
+-        var monthlyGrowthPercent = previousMonthlyRevenue == 0
+-            ? monthlyRevenue > 0 ? 100m : 0m
+-            : Math.Round(
+-                (monthlyRevenue - previousMonthlyRevenue) / previousMonthlyRevenue * 100m,
+-                1);
+-
+-        var mostPopular = await _db.ExamAttempts
+-            .GroupBy(a => a.CertificationId)
+-            .OrderByDescending(g => g.Count())
+-            .Select(g => g.Key)
+-            .FirstOrDefaultAsync(ct);
+-
+-        var mostPopularName = mostPopular == Guid.Empty
+-            ? "N/A"
+-            : (await _db.Certifications.FirstOrDefaultAsync(c => c.Id == mostPopular, ct))?.Name ?? "N/A";
+-
+-        var registrationCounts = await _db.Users
+-            .Where(u => u.CreatedAtUtc >= registrationStart)
+-            .GroupBy(u => u.CreatedAtUtc.Date)
+-            .Select(group => new { Date = group.Key, Count = group.Count() })
+-            .ToListAsync(ct);
+-
+-        var registrationsByDay = Enumerable.Range(0, 7)
+-            .Select(offset => registrationStart.AddDays(offset))
+-            .Select(date => new RegistrationByDayDto(
+-                date.ToString("yyyy-MM-dd"),
+-                registrationCounts.FirstOrDefault(item => item.Date == date)?.Count ?? 0))
+-            .ToList();
+-
+-        // Reaching this point means both the API request and its database queries
+-        // succeeded. Imports currently run synchronously, so there is no background
+-        // worker to report as running yet.
+-        var systemStatus = new SystemStatusDto(
+-            Database: "Online",
+-            Api: "Online",
+-            BackgroundJobs: "Paused");
+-
+-        return new AdminOverviewDto(
+-            totalUsers,
+-            premiumUsers,
+-            activeToday,
+-            usersOnlineNow,
+-            usersTakingExamsNow,
+-            practiceSessionsRunning,
+-            monthlyRevenue,
+-            monthlyGrowthPercent,
+-            mostPopularName,
+-            registrationsByDay,
+-            systemStatus);
+-    }
+-}
++using CertMaster.Application.Common.Interfaces;
++using CertMaster.Domain.Enums;
++using Microsoft.EntityFrameworkCore;
++
++namespace CertMaster.Application.Features.Admin;
++
++public record RegistrationByDayDto(string Date, int Count);
++
++public record SystemStatusDto(
++    string Database,
++    string Api,
++    string BackgroundJobs);
++
++public record AdminOverviewDto(
++    int TotalUsers,
++    int PremiumUsers,
++    int ActiveUsersToday,
++    int UsersOnlineNow,
++    int UsersTakingExamsNow,
++    int PracticeSessionsRunning,
++    decimal MonthlyRevenue,
++    decimal MonthlyGrowthPercent,
++    string MostPopularCertification,
++    List<RegistrationByDayDto> RegistrationsByDay,
++    SystemStatusDto SystemStatus);
++
++public record AnalyticsActivityByDayDto(string Date, int Practice, int MockExam);
++public record AnalyticsCertificationDto(Guid CertificationId, string Certification, int CompletedAttempts, decimal PassRatePercent, decimal AccuracyPercent);
++public record AnalyticsTopicDto(string Topic, int IncorrectAnswers);
++public record AnalyticsRevenueByMonthDto(string Month, decimal Revenue);
++
++public record AdminAnalyticsDto(
++    int TotalLearners,
++    int ActiveLearners,
++    int QuestionsAnswered,
++    decimal QuestionAccuracyPercent,
++    decimal AverageScorePercent,
++    decimal PassRatePercent,
++    int CompletedMockExams,
++    int CompletedPracticeSessions,
++    decimal AverageMockExamDurationMinutes,
++    string MostFailedTopic,
++    List<RegistrationByDayDto> RegistrationsByDay,
++    List<AnalyticsActivityByDayDto> AttemptsByDay,
++    List<AnalyticsCertificationDto> CertificationPerformance,
++    List<AnalyticsTopicDto> FailedTopics,
++    List<AnalyticsRevenueByMonthDto> RevenueByMonth);
++
++public class AdminService
++{
++    private readonly IApplicationDbContext _db;
++    private readonly IDateTimeProvider _clock;
++
++    public AdminService(IApplicationDbContext db, IDateTimeProvider clock)
++    {
++        _db = db;
++        _clock = clock;
++    }
++
++    public async Task<AdminOverviewDto> GetOverviewAsync(CancellationToken ct)
++    {
++        var now = _clock.UtcNow;
++        var today = now.Date;
++        var onlineCutoff = now.AddMinutes(-5);
++        var currentMonthStart = new DateTime(now.Year, now.Month, 1, 0, 0, 0, DateTimeKind.Utc);
++        var previousMonthStart = currentMonthStart.AddMonths(-1);
++        var registrationStart = today.AddDays(-29);
++
++        var totalUsers = await _db.Users.CountAsync(ct);
++        var premiumUsers = await _db.Users.CountAsync(u => u.Plan != SubscriptionPlan.Free, ct);
++        var activeToday = await _db.Users.CountAsync(u => u.LastActivityAtUtc >= today, ct);
++        var usersOnlineNow = await _db.Users.CountAsync(u => u.LastActivityAtUtc >= onlineCutoff, ct);
++
++        var usersTakingExamsNow = await _db.ExamAttempts
++            .Where(a => a.CompletedAtUtc == null)
++            .Select(a => a.UserId)
++            .Distinct()
++            .CountAsync(ct);
++
++        var practiceSessionsRunning = await _db.ExamAttempts.CountAsync(
++            a => a.CompletedAtUtc == null && a.Mode == ExamMode.Practice,
++            ct);
++
++        var monthlyRevenue = await _db.PaymentTransactions
++            .Where(p => p.Status == "Paid" && p.CreatedAtUtc >= currentMonthStart)
++            .SumAsync(p => (decimal?)p.AmountZar, ct) ?? 0;
++
++        var previousMonthlyRevenue = await _db.PaymentTransactions
++            .Where(p => p.Status == "Paid" &&
++                        p.CreatedAtUtc >= previousMonthStart &&
++                        p.CreatedAtUtc < currentMonthStart)
++            .SumAsync(p => (decimal?)p.AmountZar, ct) ?? 0;
++
++        var monthlyGrowthPercent = previousMonthlyRevenue == 0
++            ? monthlyRevenue > 0 ? 100m : 0m
++            : Math.Round((monthlyRevenue - previousMonthlyRevenue) / previousMonthlyRevenue * 100m, 1);
++
++        var mostPopular = await _db.ExamAttempts
++            .Where(a => a.CompletedAtUtc != null)
++            .GroupBy(a => a.CertificationId)
++            .OrderByDescending(g => g.Count())
++            .Select(g => g.Key)
++            .FirstOrDefaultAsync(ct);
++
++        var mostPopularName = mostPopular == Guid.Empty
++            ? "N/A"
++            : (await _db.Certifications.AsNoTracking().FirstOrDefaultAsync(c => c.Id == mostPopular, ct))?.Name ?? "N/A";
++
++        var registrationCounts = await _db.Users
++            .Where(u => u.CreatedAtUtc >= registrationStart)
++            .GroupBy(u => u.CreatedAtUtc.Date)
++            .Select(group => new { Date = group.Key, Count = group.Count() })
++            .ToListAsync(ct);
++
++        var registrationsByDay = Enumerable.Range(0, 30)
++            .Select(offset => registrationStart.AddDays(offset))
++            .Select(date => new RegistrationByDayDto(
++                date.ToString("yyyy-MM-dd"),
++                registrationCounts.FirstOrDefault(item => item.Date == date)?.Count ?? 0))
++            .ToList();
++
++        // The overview endpoint itself completed successfully, so the API and database
++        // are available. The expiration worker is registered as a hosted background job.
++        var systemStatus = new SystemStatusDto(
++            Database: "Online",
++            Api: "Online",
++            BackgroundJobs: "Running");
++
++        return new AdminOverviewDto(
++            totalUsers,
++            premiumUsers,
++            activeToday,
++            usersOnlineNow,
++            usersTakingExamsNow,
++            practiceSessionsRunning,
++            monthlyRevenue,
++            monthlyGrowthPercent,
++            mostPopularName,
++            registrationsByDay,
++            systemStatus);
++    }
++
++    public async Task<AdminAnalyticsDto> GetAnalyticsAsync(CancellationToken ct)
++    {
++        var now = _clock.UtcNow;
++        var today = now.Date;
++        var activityStart = today.AddDays(-29);
++        var firstRevenueMonth = new DateTime(now.Year, now.Month, 1, 0, 0, 0, DateTimeKind.Utc).AddMonths(-11);
++        var completedAttempts = _db.ExamAttempts.AsNoTracking().Where(a => a.CompletedAtUtc != null);
++        var answers = _db.ExamAnswers.AsNoTracking();
++
++        var totalLearners = await _db.Users.CountAsync(u => u.Role == UserRole.Learner, ct);
++        var activeLearners = await _db.Users.CountAsync(
++            u => u.Role == UserRole.Learner && u.LastActivityAtUtc >= now.AddDays(-30), ct);
++        var answered = answers.Where(a => a.SelectedOptionId != null);
++        var questionsAnswered = await answered.CountAsync(ct);
++        var correctAnswers = await answered.CountAsync(a => a.IsCorrect, ct);
++        var questionAccuracy = questionsAnswered == 0 ? 0m : Math.Round(correctAnswers * 100m / questionsAnswered, 1);
++
++        var averageScore = await completedAttempts.Select(a => (double?)a.Score).AverageAsync(ct) ?? 0;
++        var completedCount = await completedAttempts.CountAsync(ct);
++        var passedCount = await completedAttempts.CountAsync(a => a.Passed, ct);
++        var passRate = completedCount == 0 ? 0m : Math.Round(passedCount * 100m / completedCount, 1);
++        var completedMockExams = await completedAttempts.CountAsync(a => a.Mode == ExamMode.MockExam, ct);
++        var completedPracticeSessions = await completedAttempts.CountAsync(a => a.Mode == ExamMode.Practice, ct);
++        var averageMockDurationSeconds = await completedAttempts
++            .Where(a => a.Mode == ExamMode.MockExam)
++            .Select(a => (double?)a.DurationSeconds)
++            .AverageAsync(ct) ?? 0;
++
++        var registrationCounts = await _db.Users
++            .Where(u => u.CreatedAtUtc >= activityStart)
++            .GroupBy(u => u.CreatedAtUtc.Date)
++            .Select(g => new { Date = g.Key, Count = g.Count() })
++            .ToListAsync(ct);
++        var registrationsByDay = Enumerable.Range(0, 30)
++            .Select(offset => activityStart.AddDays(offset))
++            .Select(date => new RegistrationByDayDto(
++                date.ToString("yyyy-MM-dd"),
++                registrationCounts.FirstOrDefault(x => x.Date == date)?.Count ?? 0))
++            .ToList();
++
++        var attemptCounts = await completedAttempts
++            .Where(a => a.CompletedAtUtc >= activityStart)
++            .GroupBy(a => new { Date = a.CompletedAtUtc!.Value.Date, a.Mode })
++            .Select(g => new { g.Key.Date, g.Key.Mode, Count = g.Count() })
++            .ToListAsync(ct);
++        var attemptsByDay = Enumerable.Range(0, 30)
++            .Select(offset => activityStart.AddDays(offset))
++            .Select(date => new AnalyticsActivityByDayDto(
++                date.ToString("yyyy-MM-dd"),
++                attemptCounts.FirstOrDefault(x => x.Date == date && x.Mode == ExamMode.Practice)?.Count ?? 0,
++                attemptCounts.FirstOrDefault(x => x.Date == date && x.Mode == ExamMode.MockExam)?.Count ?? 0))
++            .ToList();
++
++        var certificationAttempts = await completedAttempts
++            .GroupBy(a => new { a.CertificationId, CertificationName = a.Certification!.Name })
++            .Select(g => new
++            {
++                g.Key.CertificationId,
++                g.Key.CertificationName,
++                CompletedAttempts = g.Count(),
++                Passed = g.Count(a => a.Passed),
++                AverageScore = g.Average(a => (double)a.Score)
++            })
++            .OrderByDescending(x => x.CompletedAttempts)
++            .Take(15)
++            .ToListAsync(ct);
++
++        var certificationAnswerStats = await answers
++            .Where(a => a.ExamAttempt != null && a.ExamAttempt.CompletedAtUtc != null)
++            .GroupBy(a => new { a.ExamAttempt!.CertificationId, CertificationName = a.ExamAttempt.Certification!.Name })
++            .Select(g => new { g.Key.CertificationId, g.Key.CertificationName, Correct = g.Count(a => a.IsCorrect), Total = g.Count() })
++            .ToListAsync(ct);
++
++        var certificationPerformance = certificationAttempts
++            .Select(item =>
++            {
++                var answerStats = certificationAnswerStats.FirstOrDefault(x =>
++                    x.CertificationId == item.CertificationId);
++                var accuracy = answerStats is null || answerStats.Total == 0
++                    ? 0m
++                    : Math.Round(answerStats.Correct * 100m / answerStats.Total, 1);
++                return new AnalyticsCertificationDto(
++                    item.CertificationId,
++                    item.CertificationName,
++                    item.CompletedAttempts,
++                    Math.Round(item.Passed * 100m / item.CompletedAttempts, 1),
++                    accuracy);
++            })
++            .ToList();
++
++        var failedTopics = await answers
++            .Where(a => a.SelectedOptionId != null && !a.IsCorrect && a.Question != null && a.ExamAttempt != null && a.ExamAttempt.CompletedAtUtc != null)
++            .GroupBy(a => a.Question!.Topic)
++            .Select(g => new AnalyticsTopicDto(g.Key, g.Count()))
++            .OrderByDescending(x => x.IncorrectAnswers)
++            .ThenBy(x => x.Topic)
++            .Take(10)
++            .ToListAsync(ct);
++
++        var revenueRows = await _db.PaymentTransactions
++            .AsNoTracking()
++            .Where(p => p.Status == "Paid" && p.CreatedAtUtc >= firstRevenueMonth)
++            .GroupBy(p => new { p.CreatedAtUtc.Year, p.CreatedAtUtc.Month })
++            .Select(g => new { g.Key.Year, g.Key.Month, Revenue = g.Sum(p => p.AmountZar) })
++            .ToListAsync(ct);
++        var revenueByMonth = Enumerable.Range(0, 12)
++            .Select(offset => firstRevenueMonth.AddMonths(offset))
++            .Select(month => new AnalyticsRevenueByMonthDto(
++                month.ToString("yyyy-MM"),
++                revenueRows.FirstOrDefault(x => x.Year == month.Year && x.Month == month.Month)?.Revenue ?? 0))
++            .ToList();
++
++        return new AdminAnalyticsDto(
++            totalLearners,
++            activeLearners,
++            questionsAnswered,
++            questionAccuracy,
++            Math.Round((decimal)averageScore, 1),
++            passRate,
++            completedMockExams,
++            completedPracticeSessions,
++            Math.Round((decimal)averageMockDurationSeconds / 60m, 1),
++            failedTopics.FirstOrDefault()?.Topic ?? "No data",
++            registrationsByDay,
++            attemptsByDay,
++            certificationPerformance,
++            failedTopics,
++            revenueByMonth);
++    }
++}
+diff --git a/frontend/src/components/charts/AdminAnalyticsCharts.tsx b/frontend/src/components/charts/AdminAnalyticsCharts.tsx
+new file mode 100644
+index 0000000..8abb176
+--- /dev/null
++++ b/frontend/src/components/charts/AdminAnalyticsCharts.tsx
+@@ -0,0 +1,69 @@
++import { Chart as ChartJS, CategoryScale, LinearScale, BarElement, PointElement, LineElement, Tooltip, Legend, Filler } from "chart.js";
++import { Bar, Line } from "react-chartjs-2";
++
++ChartJS.register(CategoryScale, LinearScale, BarElement, PointElement, LineElement, Tooltip, Legend, Filler);
++
++const shortDate = (value: string) => {
++  const date = new Date(`${value}T00:00:00Z`);
++  return `${date.getUTCDate()}/${date.getUTCMonth() + 1}`;
++};
++
++export function AdminAttemptActivityChart({ data }: { data: { date: string; practice: number; mockExam: number }[] }) {
++  return (
++    <Line
++      data={{
++        labels: data.map((item) => shortDate(item.date)),
++        datasets: [
++          { label: "Practice", data: data.map((item) => item.practice), tension: 0.3 },
++          { label: "Mock exams", data: data.map((item) => item.mockExam), tension: 0.3 },
++        ],
++      }}
++      options={{ responsive: true, maintainAspectRatio: false, plugins: { legend: { position: "bottom" } }, scales: { y: { beginAtZero: true } } }}
++    />
++  );
++}
++
++export function AdminCertificationPerformanceChart({ data }: { data: { certification: string; passRatePercent: number; accuracyPercent: number }[] }) {
++  return (
++    <Bar
++      data={{
++        labels: data.map((item) => item.certification),
++        datasets: [
++          { label: "Pass rate %", data: data.map((item) => item.passRatePercent) },
++          { label: "Question accuracy %", data: data.map((item) => item.accuracyPercent) },
++        ],
++      }}
++      options={{ responsive: true, maintainAspectRatio: false, plugins: { legend: { position: "bottom" } }, scales: { y: { beginAtZero: true, max: 100 } } }}
++    />
++  );
++}
++
++export function AdminFailedTopicsChart({ data }: { data: { topic: string; incorrectAnswers: number }[] }) {
++  return (
++    <Bar
++      data={{
++        labels: data.map((item) => item.topic),
++        datasets: [{ label: "Incorrect answers", data: data.map((item) => item.incorrectAnswers) }],
++      }}
++      options={{
++        indexAxis: "y",
++        responsive: true,
++        maintainAspectRatio: false,
++        plugins: { legend: { display: false } },
++        scales: { x: { beginAtZero: true } },
++      }}
++    />
++  );
++}
++
++export function AdminRevenueChart({ data }: { data: { month: string; revenue: number }[] }) {
++  return (
++    <Bar
++      data={{
++        labels: data.map((item) => item.month),
++        datasets: [{ label: "Revenue (ZAR)", data: data.map((item) => item.revenue) }],
++      }}
++      options={{ responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } }}
++    />
++  );
++}
+diff --git a/frontend/src/hooks/useApiData.ts b/frontend/src/hooks/useApiData.ts
+index 833335b..839e31d 100644
+--- a/frontend/src/hooks/useApiData.ts
++++ b/frontend/src/hooks/useApiData.ts
+@@ -1,73 +1,95 @@
+-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+-import { api } from "../lib/api";
+-import {
+-  mockAdminOverview,
+-  mockBookmarkedIds,
+-  mockCertifications,
+-  mockLeaderboard,
+-  mockMaintenanceWindows,
+-  mockNotifications,
+-  mockOpenReports,
+-  mockQuestions,
+-  mockSearch,
+-} from "../lib/mockData";
+-import type {
+-  AdminOverview,
+-  AppNotification,
+-  BookmarkedQuestion,
+-  Certification,
+-  ExamSubmitResult,
+-  Flashcard,
+-  LeaderboardEntry,
+-  MaintenanceWindow,
+-  Question,
+-  QuestionReport,
+-  SearchResult,
++import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
++import { api } from "../lib/api";
++import {
++  mockBookmarkedIds,
++  mockCertifications,
++  mockLeaderboard,
++  mockMaintenanceWindows,
++  mockNotifications,
++  mockOpenReports,
++  mockQuestions,
++  mockSearch,
++} from "../lib/mockData";
++import type {
++  AdminOverview,
++  AppNotification,
++  BookmarkedQuestion,
++  Certification,
++  ExamSubmitResult,
++  Flashcard,
++  LeaderboardEntry,
++  MaintenanceWindow,
++  Question,
++  QuestionReport,
++  SearchResult,
+   ExamAttempt, ExamAttemptDetail, PagedResult, AdminUser, AdminUserDetail, AdminCertification, AdminResult, AdminResultDetail, AdminQuestion, AuditLog, Payment, ExamSession,
+-} from "../types";
+-
+-const USE_MOCKS = import.meta.env.DEV && import.meta.env.VITE_USE_MOCKS === "true";
+-
+-export function useMyResults() { return useQuery<ExamAttempt[]>({ queryKey: ["exam-results"], queryFn: async () => (await api.get("/exams/my-results")).data }); }
+-export function useMyResult(id?: string) { return useQuery<ExamAttemptDetail>({ queryKey: ["exam-results", id], queryFn: async () => (await api.get(`/exams/my-results/${id}`)).data, enabled: Boolean(id) }); }
+-export function useAdminUsers(params: { search?: string; role?: string; plan?: string; status?: string; page: number; pageSize: number }) {
+-  return useQuery<PagedResult<AdminUser>>({ queryKey: ["admin", "users", params], queryFn: async () => (await api.get("/admin/users", { params })).data });
+-}
+-export function useSetUserSuspended() { const qc = useQueryClient(); return useMutation({ mutationFn: async ({ id, suspended }: { id: string; suspended: boolean }) => api.post(`/admin/users/${id}/${suspended ? "suspend" : "reactivate"}`), onSuccess: () => qc.invalidateQueries({ queryKey: ["admin", "users"] }) }); }
++} from "../types";
++
++const USE_MOCKS = import.meta.env.DEV && import.meta.env.VITE_USE_MOCKS === "true";
++
++export function useMyResults() { return useQuery<ExamAttempt[]>({ queryKey: ["exam-results"], queryFn: async () => (await api.get("/exams/my-results")).data }); }
++export function useMyResult(id?: string) { return useQuery<ExamAttemptDetail>({ queryKey: ["exam-results", id], queryFn: async () => (await api.get(`/exams/my-results/${id}`)).data, enabled: Boolean(id) }); }
++export function useAdminUsers(params: { search?: string; role?: string; plan?: string; status?: string; page: number; pageSize: number }) {
++  return useQuery<PagedResult<AdminUser>>({ queryKey: ["admin", "users", params], queryFn: async () => (await api.get("/admin/users", { params })).data });
++}
++export function useSetUserSuspended() { const qc = useQueryClient(); return useMutation({ mutationFn: async ({ id, suspended }: { id: string; suspended: boolean }) => api.post(`/admin/users/${id}/${suspended ? "suspend" : "reactivate"}`), onSuccess: () => qc.invalidateQueries({ queryKey: ["admin", "users"] }) }); }
+ export function useAdminLogs(page = 1, search = "", level = "") { return useQuery<PagedResult<AuditLog>>({ queryKey: ["admin", "logs", page, search, level], queryFn: async () => (await api.get("/admin/logs", { params: { page, search: search || undefined, level: level || undefined } })).data }); }
+-export function useAdminPayments() { return useQuery<Payment[]>({ queryKey: ["admin", "payments"], queryFn: async () => (await api.get("/admin/payments")).data }); }
+-export function usePaymentSummary() { return useQuery<{ monthlyRevenue: number; activeSubscriptions: number; monthlyPlans: number; yearlyPlans: number }>({ queryKey: ["admin", "payment-summary"], queryFn: async () => (await api.get("/admin/payment-summary")).data }); }
+-export function useAdminAnalytics() { return useQuery<{ questionAccuracyPercent: number; averageMockExamDurationMinutes: number; mostFailedTopic: string }>({ queryKey: ["admin", "analytics"], queryFn: async () => (await api.get("/admin/analytics")).data }); }
+-export function useStartExam() { return useMutation({ mutationFn: async (payload: { certificationId: string; mode: "Practice" | "MockExam" }) => (await api.post<ExamSession>("/exams/start", payload)).data }); }
+-export function useSaveExamAnswer() { return useMutation({ mutationFn: async (p: { attemptId: string; questionId: string; selectedOptionId: string | null; wasFlaggedForReview: boolean }) => api.put(`/exams/${p.attemptId}/answers/${p.questionId}`, { selectedOptionId: p.selectedOptionId, wasFlaggedForReview: p.wasFlaggedForReview }) }); }
+-export function useSubmitPracticeAnswer() {
+-  return useMutation({
+-    mutationFn: async (p: { attemptId: string; questionId: string; selectedOptionId: string | null; wasFlaggedForReview: boolean }) =>
+-      (await api.post(`/exams/${p.attemptId}/practice-answers/${p.questionId}`, {
+-        selectedOptionId: p.selectedOptionId,
+-        wasFlaggedForReview: p.wasFlaggedForReview,
+-      })).data as {
+-        questionId: string;
+-        isCorrect: boolean;
+-        correctOptionId?: string;
+-        correctOption?: string;
+-        explanation: string;
+-      },
+-  });
+-}
+-export function useCompleteExam() { const qc = useQueryClient(); return useMutation({ mutationFn: async (attemptId: string) => (await api.post<ExamSubmitResult>(`/exams/${attemptId}/complete`)).data, onSuccess: () => { qc.invalidateQueries({ queryKey: ["exam-results"] }); qc.invalidateQueries({ queryKey: ["dashboard"] }); } }); }
+-
+-export function useCertifications() {
+-  return useQuery<Certification[]>({
+-    queryKey: ["certifications"],
+-    queryFn: async () => {
+-      if (USE_MOCKS) return mockCertifications;
+-      const { data } = await api.get<Certification[]>("/certifications");
+-      return data;
+-    },
+-  });
+-}
+-
++export function useAdminPayments() { return useQuery<Payment[]>({ queryKey: ["admin", "payments"], queryFn: async () => (await api.get("/admin/payments")).data }); }
++export function usePaymentSummary() { return useQuery<{ monthlyRevenue: number; activeSubscriptions: number; monthlyPlans: number; yearlyPlans: number }>({ queryKey: ["admin", "payment-summary"], queryFn: async () => (await api.get("/admin/payment-summary")).data }); }
++export interface AdminAnalytics {
++  totalLearners: number;
++  activeLearners: number;
++  questionsAnswered: number;
++  questionAccuracyPercent: number;
++  averageScorePercent: number;
++  passRatePercent: number;
++  completedMockExams: number;
++  completedPracticeSessions: number;
++  averageMockExamDurationMinutes: number;
++  mostFailedTopic: string;
++  registrationsByDay: { date: string; count: number }[];
++  attemptsByDay: { date: string; practice: number; mockExam: number }[];
++  certificationPerformance: { certificationId: string; certification: string; completedAttempts: number; passRatePercent: number; accuracyPercent: number }[];
++  failedTopics: { topic: string; incorrectAnswers: number }[];
++  revenueByMonth: { month: string; revenue: number }[];
++}
++
++export function useAdminAnalytics() {
++  return useQuery<AdminAnalytics>({
++    queryKey: ["admin", "analytics"],
++    queryFn: async () => (await api.get<AdminAnalytics>("/admin/analytics")).data,
++  });
++}
++export function useStartExam() { return useMutation({ mutationFn: async (payload: { certificationId: string; mode: "Practice" | "MockExam" }) => (await api.post<ExamSession>("/exams/start", payload)).data }); }
++export function useSaveExamAnswer() { return useMutation({ mutationFn: async (p: { attemptId: string; questionId: string; selectedOptionId: string | null; wasFlaggedForReview: boolean }) => api.put(`/exams/${p.attemptId}/answers/${p.questionId}`, { selectedOptionId: p.selectedOptionId, wasFlaggedForReview: p.wasFlaggedForReview }) }); }
++export function useSubmitPracticeAnswer() {
++  return useMutation({
++    mutationFn: async (p: { attemptId: string; questionId: string; selectedOptionId: string | null; wasFlaggedForReview: boolean }) =>
++      (await api.post(`/exams/${p.attemptId}/practice-answers/${p.questionId}`, {
++        selectedOptionId: p.selectedOptionId,
++        wasFlaggedForReview: p.wasFlaggedForReview,
++      })).data as {
++        questionId: string;
++        isCorrect: boolean;
++        correctOptionId?: string;
++        correctOption?: string;
++        explanation: string;
++      },
++  });
++}
++export function useCompleteExam() { const qc = useQueryClient(); return useMutation({ mutationFn: async (attemptId: string) => (await api.post<ExamSubmitResult>(`/exams/${attemptId}/complete`)).data, onSuccess: () => { qc.invalidateQueries({ queryKey: ["exam-results"] }); qc.invalidateQueries({ queryKey: ["dashboard"] }); } }); }
++
++export function useCertifications() {
++  return useQuery<Certification[]>({
++    queryKey: ["certifications"],
++    queryFn: async () => {
++      if (USE_MOCKS) return mockCertifications;
++      const { data } = await api.get<Certification[]>("/certifications");
++      return data;
++    },
++  });
++}
++
+ export function useAdminUser(id?: string) {
+   return useQuery<AdminUserDetail>({ queryKey: ["admin", "user", id], queryFn: async () => (await api.get(`/admin/users/${id}`)).data, enabled: Boolean(id) });
+ }
+@@ -107,324 +129,320 @@ export function useCancelMaintenanceWindow() {
+   return useMutation({ mutationFn: async (id: string) => api.post(`/admin/maintenance/${id}/cancel`), onSuccess: () => qc.invalidateQueries({ queryKey: ["admin", "maintenance"] }) });
+ }
+ 
+-export function useAdminOverview() {
+-  return useQuery<AdminOverview>({
+-    queryKey: ["admin", "overview"],
+-    queryFn: async () => {
+-      if (USE_MOCKS) return mockAdminOverview;
+-      const { data } = await api.get<AdminOverview>("/admin/overview");
+-      return data;
+-    },
+-  });
+-}
+-
+-export function useMaintenanceWindows() {
+-  return useQuery<MaintenanceWindow[]>({
+-    queryKey: ["admin", "maintenance"],
+-    queryFn: async () => {
+-      if (USE_MOCKS) return mockMaintenanceWindows;
+-      const { data } = await api.get<MaintenanceWindow[]>("/admin/maintenance");
+-      return data;
+-    },
+-  });
+-}
+-
+-export function usePracticeQuestions(certificationId?: string) {
+-  return useQuery<Question[]>({
+-    queryKey: ["questions", "practice", certificationId],
+-    queryFn: async () => {
+-      if (USE_MOCKS) {
+-        return certificationId
+-          ? mockQuestions.filter((q) => q.certificationId === certificationId)
+-          : mockQuestions;
+-      }
+-      const { data } = await api.get<Question[]>("/questions/practice", { params: { certificationId } });
+-      return data;
+-    },
+-  });
+-}
+-
+-export function useNotifications() {
+-  return useQuery<AppNotification[]>({
+-    queryKey: ["notifications"],
+-    queryFn: async () => {
+-      if (USE_MOCKS) return mockNotifications;
+-      const { data } = await api.get<AppNotification[]>("/notifications");
+-      return data;
+-    },
+-    refetchInterval: USE_MOCKS ? false : 60_000,
+-  });
+-}
+-
+-export function useMarkNotificationRead() {
+-  const queryClient = useQueryClient();
+-  return useMutation({
+-    mutationFn: async (id: string) => {
+-      if (USE_MOCKS) return;
+-      await api.post(`/notifications/${id}/read`);
+-    },
+-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["notifications"] }),
+-  });
+-}
+-
+-export function useMarkAllNotificationsRead() {
+-  const queryClient = useQueryClient();
+-  return useMutation({
+-    mutationFn: async () => {
+-      if (USE_MOCKS) return;
+-      await api.post("/notifications/read-all");
+-    },
+-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["notifications"] }),
+-  });
+-}
+-
+-export function useFlashcards(certificationId?: string) {
+-  return useQuery<Flashcard[]>({
+-    queryKey: ["flashcards", certificationId],
+-    queryFn: async () => {
+-      if (USE_MOCKS) {
+-        const source = certificationId
+-          ? mockQuestions.filter((q) => q.certificationId === certificationId)
+-          : mockQuestions;
+-        return source.map((q) => ({ id: q.id, topic: q.topic, front: q.prompt, back: q.explanation, reference: q.reference }));
+-      }
+-      const { data } = await api.get<Flashcard[]>("/flashcards", { params: { certificationId } });
+-      return data;
+-    },
+-    enabled: !USE_MOCKS ? true : true,
+-  });
+-}
+-
+-export function useSearch(term: string) {
+-  return useQuery<SearchResult[]>({
+-    queryKey: ["search", term],
+-    queryFn: async () => {
+-      if (USE_MOCKS) return mockSearch(term);
+-      const { data } = await api.get<SearchResult[]>("/search", { params: { q: term } });
+-      return data;
+-    },
+-    enabled: term.trim().length >= 2,
+-    staleTime: 10_000,
+-  });
+-}
+-
+-export function useBookmarkedIds() {
+-  return useQuery<Set<string>>({
+-    queryKey: ["bookmarks", "ids"],
+-    queryFn: async () => {
+-      if (USE_MOCKS) return new Set(mockBookmarkedIds);
+-      const { data } = await api.get<string[]>("/bookmarks/ids");
+-      return new Set(data);
+-    },
+-  });
+-}
+-
+-export function useToggleBookmark() {
+-  const queryClient = useQueryClient();
+-  return useMutation({
+-    mutationFn: async (questionId: string) => {
+-      if (USE_MOCKS) {
+-        if (mockBookmarkedIds.has(questionId)) mockBookmarkedIds.delete(questionId);
+-        else mockBookmarkedIds.add(questionId);
+-        return { isBookmarked: mockBookmarkedIds.has(questionId) };
+-      }
+-      const { data } = await api.post<{ isBookmarked: boolean }>(`/bookmarks/${questionId}/toggle`);
+-      return data;
+-    },
+-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["bookmarks"] }),
+-  });
+-}
+-
+-export function useMyBookmarks() {
+-  return useQuery<BookmarkedQuestion[]>({
+-    queryKey: ["bookmarks", "list"],
+-    queryFn: async () => {
+-      if (USE_MOCKS) {
+-        return mockQuestions
+-          .filter((q) => mockBookmarkedIds.has(q.id))
+-          .map((q) => ({
+-            questionId: q.id,
+-            certificationId: q.certificationId,
+-            topic: q.topic,
+-            difficulty: q.difficulty,
+-            prompt: q.prompt,
+-            bookmarkedAtUtc: new Date().toISOString(),
+-          }));
+-      }
+-      const { data } = await api.get<BookmarkedQuestion[]>("/bookmarks");
+-      return data;
+-    },
+-  });
+-}
+-
+-export function useReportQuestion() {
+-  return useMutation({
+-    mutationFn: async ({ questionId, reason }: { questionId: string; reason: string }) => {
+-      if (USE_MOCKS) {
+-        await new Promise((r) => setTimeout(r, 300));
+-        return { message: "Thanks — our content team will review this question." };
+-      }
+-      const { data } = await api.post("/question-reports", { questionId, reason });
+-      return data;
+-    },
+-  });
+-}
+-
+-export function useLeaderboard(take = 10, period: "AllTime" | "Monthly" = "AllTime") {
+-  return useQuery<LeaderboardEntry[]>({
+-    queryKey: ["leaderboard", take, period],
+-    queryFn: async () => {
+-      if (USE_MOCKS) return mockLeaderboard.filter((e) => !e.isCurrentUser).slice(0, take);
+-      const { data } = await api.get<LeaderboardEntry[]>("/leaderboard", { params: { take, period } });
+-      return data;
+-    },
+-  });
+-}
+-
+-export function useMyLeaderboardRank(period: "AllTime" | "Monthly" = "AllTime") {
+-  return useQuery<LeaderboardEntry | null>({
+-    queryKey: ["leaderboard", "me", period],
+-    queryFn: async () => {
+-      if (USE_MOCKS) return mockLeaderboard.find((e) => e.isCurrentUser) ?? null;
+-      const { data } = await api.get<LeaderboardEntry | null>("/leaderboard/me", { params: { period } });
+-      return data;
+-    },
+-  });
+-}
+-
+-export function useUpdateProfile() {
+-  return useMutation({
+-    mutationFn: async (fullName: string) => {
+-      if (USE_MOCKS) {
+-        await new Promise((r) => setTimeout(r, 300));
+-        return { message: "Profile updated." };
+-      }
+-      const { data } = await api.put("/profile", { fullName });
+-      return data;
+-    },
+-  });
+-}
+-
+-export function useChangePassword() {
+-  return useMutation({
+-    mutationFn: async (payload: { currentPassword: string; newPassword: string }) => {
+-      if (USE_MOCKS) {
+-        await new Promise((r) => setTimeout(r, 300));
+-        return { message: "Password updated." };
+-      }
+-      const { data } = await api.post("/profile/change-password", payload);
+-      return data;
+-    },
+-  });
+-}
+-
+-export interface NotificationPreferences {
+-  dailyReminders: boolean;
+-  weeklySummary: boolean;
+-  productUpdates: boolean;
+-}
+-
+-const DEFAULT_NOTIFICATION_PREFERENCES: NotificationPreferences = {
+-  dailyReminders: true,
+-  weeklySummary: true,
+-  productUpdates: true,
+-};
+-
+-export function useNotificationPreferences() {
+-  return useQuery<NotificationPreferences>({
+-    queryKey: ["profile", "notification-preferences"],
+-    queryFn: async () => {
+-      if (USE_MOCKS) return DEFAULT_NOTIFICATION_PREFERENCES;
+-      const { data } = await api.get<NotificationPreferences>("/profile/notification-preferences");
+-      return data;
+-    },
+-  });
+-}
+-
+-export function useUpdateNotificationPreferences() {
+-  const queryClient = useQueryClient();
+-  return useMutation({
+-    mutationFn: async (prefs: NotificationPreferences) => {
+-      if (USE_MOCKS) {
+-        await new Promise((r) => setTimeout(r, 300));
+-        return prefs;
+-      }
+-      const { data } = await api.put("/profile/notification-preferences", prefs);
+-      return data;
+-    },
+-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["profile", "notification-preferences"] }),
+-  });
+-}
+-
+-export function useOpenQuestionReports() {
+-  return useQuery<QuestionReport[]>({
+-    queryKey: ["admin", "question-reports"],
+-    queryFn: async () => {
+-      if (USE_MOCKS) return mockOpenReports.filter((r) => !r.resolved);
+-      const { data } = await api.get<QuestionReport[]>("/question-reports/open");
+-      return data;
+-    },
+-  });
+-}
+-
+-export function useResolveQuestionReport() {
+-  const queryClient = useQueryClient();
+-  return useMutation({
+-    mutationFn: async ({ id, action }: { id: string; action: "Republish" | "KeepFlagged" }) => {
+-      if (USE_MOCKS) {
+-        const report = mockOpenReports.find((r) => r.id === id);
+-        if (report) report.resolved = true;
+-        await new Promise((r) => setTimeout(r, 300));
+-        return;
+-      }
+-      await api.post(`/question-reports/${id}/resolve`, { action });
+-    },
+-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["admin", "question-reports"] }),
+-  });
+-}
+-
+-export interface SubmitExamPayload {
+-  certificationId: string;
+-  mode: "Practice" | "MockExam";
+-  durationSeconds: number;
+-  answers: { questionId: string; selectedOptionId: string | null; wasFlaggedForReview: boolean }[];
+-}
+-
+-/**
+- * Persists a practice or mock exam attempt to the backend so it counts toward the
+- * dashboard's stats, weak/strong topics, study streak, and the leaderboard. In mock
+- * mode, scores the answers against mockQuestions locally so the UI behaves the same
+- * way without a real backend.
+- */
+-export function useSubmitExam() {
+-  const queryClient = useQueryClient();
+-  return useMutation({
+-    mutationFn: async (payload: SubmitExamPayload): Promise<ExamSubmitResult> => {
+-      if (USE_MOCKS) {
+-        let correctCount = 0;
+-        for (const answer of payload.answers) {
+-          const question = mockQuestions.find((q) => q.id === answer.questionId);
+-          const option = question?.options.find((o) => o.id === answer.selectedOptionId);
+-          if (option?.isCorrect) correctCount++;
+-        }
+-        const totalQuestions = payload.answers.length;
+-        const score = totalQuestions === 0 ? 0 : Math.round((correctCount / totalQuestions) * 100);
+-        return {
+-          attemptId: `mock-${Date.now()}`,
+-          totalQuestions,
+-          correctCount,
+-          score,
+-          passed: score >= 65,
+-        };
+-      }
+-
+-      const { data } = await api.post<ExamSubmitResult>("/exams/submit", payload);
+-      return data;
+-    },
+-    onSuccess: () => {
+-      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+-      queryClient.invalidateQueries({ queryKey: ["leaderboard"] });
+-      queryClient.invalidateQueries({ queryKey: ["notifications"] });
+-    },
+-  });
+-}
++export function useAdminOverview() {
++  return useQuery<AdminOverview>({
++    queryKey: ["admin", "overview"],
++    queryFn: async () => (await api.get<AdminOverview>("/admin/overview")).data,
++  });
++}
++
++export function useMaintenanceWindows() {
++  return useQuery<MaintenanceWindow[]>({
++    queryKey: ["admin", "maintenance"],
++    queryFn: async () => {
++      if (USE_MOCKS) return mockMaintenanceWindows;
++      const { data } = await api.get<MaintenanceWindow[]>("/admin/maintenance");
++      return data;
++    },
++  });
++}
++
++export function usePracticeQuestions(certificationId?: string) {
++  return useQuery<Question[]>({
++    queryKey: ["questions", "practice", certificationId],
++    queryFn: async () => {
++      if (USE_MOCKS) {
++        return certificationId
++          ? mockQuestions.filter((q) => q.certificationId === certificationId)
++          : mockQuestions;
++      }
++      const { data } = await api.get<Question[]>("/questions/practice", { params: { certificationId } });
++      return data;
++    },
++  });
++}
++
++export function useNotifications() {
++  return useQuery<AppNotification[]>({
++    queryKey: ["notifications"],
++    queryFn: async () => {
++      if (USE_MOCKS) return mockNotifications;
++      const { data } = await api.get<AppNotification[]>("/notifications");
++      return data;
++    },
++    refetchInterval: USE_MOCKS ? false : 60_000,
++  });
++}
++
++export function useMarkNotificationRead() {
++  const queryClient = useQueryClient();
++  return useMutation({
++    mutationFn: async (id: string) => {
++      if (USE_MOCKS) return;
++      await api.post(`/notifications/${id}/read`);
++    },
++    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["notifications"] }),
++  });
++}
++
++export function useMarkAllNotificationsRead() {
++  const queryClient = useQueryClient();
++  return useMutation({
++    mutationFn: async () => {
++      if (USE_MOCKS) return;
++      await api.post("/notifications/read-all");
++    },
++    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["notifications"] }),
++  });
++}
++
++export function useFlashcards(certificationId?: string) {
++  return useQuery<Flashcard[]>({
++    queryKey: ["flashcards", certificationId],
++    queryFn: async () => {
++      if (USE_MOCKS) {
++        const source = certificationId
++          ? mockQuestions.filter((q) => q.certificationId === certificationId)
++          : mockQuestions;
++        return source.map((q) => ({ id: q.id, topic: q.topic, front: q.prompt, back: q.explanation, reference: q.reference }));
++      }
++      const { data } = await api.get<Flashcard[]>("/flashcards", { params: { certificationId } });
++      return data;
++    },
++    enabled: !USE_MOCKS ? true : true,
++  });
++}
++
++export function useSearch(term: string) {
++  return useQuery<SearchResult[]>({
++    queryKey: ["search", term],
++    queryFn: async () => {
++      if (USE_MOCKS) return mockSearch(term);
++      const { data } = await api.get<SearchResult[]>("/search", { params: { q: term } });
++      return data;
++    },
++    enabled: term.trim().length >= 2,
++    staleTime: 10_000,
++  });
++}
++
++export function useBookmarkedIds() {
++  return useQuery<Set<string>>({
++    queryKey: ["bookmarks", "ids"],
++    queryFn: async () => {
++      if (USE_MOCKS) return new Set(mockBookmarkedIds);
++      const { data } = await api.get<string[]>("/bookmarks/ids");
++      return new Set(data);
++    },
++  });
++}
++
++export function useToggleBookmark() {
++  const queryClient = useQueryClient();
++  return useMutation({
++    mutationFn: async (questionId: string) => {
++      if (USE_MOCKS) {
++        if (mockBookmarkedIds.has(questionId)) mockBookmarkedIds.delete(questionId);
++        else mockBookmarkedIds.add(questionId);
++        return { isBookmarked: mockBookmarkedIds.has(questionId) };
++      }
++      const { data } = await api.post<{ isBookmarked: boolean }>(`/bookmarks/${questionId}/toggle`);
++      return data;
++    },
++    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["bookmarks"] }),
++  });
++}
++
++export function useMyBookmarks() {
++  return useQuery<BookmarkedQuestion[]>({
++    queryKey: ["bookmarks", "list"],
++    queryFn: async () => {
++      if (USE_MOCKS) {
++        return mockQuestions
++          .filter((q) => mockBookmarkedIds.has(q.id))
++          .map((q) => ({
++            questionId: q.id,
++            certificationId: q.certificationId,
++            topic: q.topic,
++            difficulty: q.difficulty,
++            prompt: q.prompt,
++            bookmarkedAtUtc: new Date().toISOString(),
++          }));
++      }
++      const { data } = await api.get<BookmarkedQuestion[]>("/bookmarks");
++      return data;
++    },
++  });
++}
++
++export function useReportQuestion() {
++  return useMutation({
++    mutationFn: async ({ questionId, reason }: { questionId: string; reason: string }) => {
++      if (USE_MOCKS) {
++        await new Promise((r) => setTimeout(r, 300));
++        return { message: "Thanks — our content team will review this question." };
++      }
++      const { data } = await api.post("/question-reports", { questionId, reason });
++      return data;
++    },
++  });
++}
++
++export function useLeaderboard(take = 10, period: "AllTime" | "Monthly" = "AllTime") {
++  return useQuery<LeaderboardEntry[]>({
++    queryKey: ["leaderboard", take, period],
++    queryFn: async () => {
++      if (USE_MOCKS) return mockLeaderboard.filter((e) => !e.isCurrentUser).slice(0, take);
++      const { data } = await api.get<LeaderboardEntry[]>("/leaderboard", { params: { take, period } });
++      return data;
++    },
++  });
++}
++
++export function useMyLeaderboardRank(period: "AllTime" | "Monthly" = "AllTime") {
++  return useQuery<LeaderboardEntry | null>({
++    queryKey: ["leaderboard", "me", period],
++    queryFn: async () => {
++      if (USE_MOCKS) return mockLeaderboard.find((e) => e.isCurrentUser) ?? null;
++      const { data } = await api.get<LeaderboardEntry | null>("/leaderboard/me", { params: { period } });
++      return data;
++    },
++  });
++}
++
++export function useUpdateProfile() {
++  return useMutation({
++    mutationFn: async (fullName: string) => {
++      if (USE_MOCKS) {
++        await new Promise((r) => setTimeout(r, 300));
++        return { message: "Profile updated." };
++      }
++      const { data } = await api.put("/profile", { fullName });
++      return data;
++    },
++  });
++}
++
++export function useChangePassword() {
++  return useMutation({
++    mutationFn: async (payload: { currentPassword: string; newPassword: string }) => {
++      if (USE_MOCKS) {
++        await new Promise((r) => setTimeout(r, 300));
++        return { message: "Password updated." };
++      }
++      const { data } = await api.post("/profile/change-password", payload);
++      return data;
++    },
++  });
++}
++
++export interface NotificationPreferences {
++  dailyReminders: boolean;
++  weeklySummary: boolean;
++  productUpdates: boolean;
++}
++
++const DEFAULT_NOTIFICATION_PREFERENCES: NotificationPreferences = {
++  dailyReminders: true,
++  weeklySummary: true,
++  productUpdates: true,
++};
++
++export function useNotificationPreferences() {
++  return useQuery<NotificationPreferences>({
++    queryKey: ["profile", "notification-preferences"],
++    queryFn: async () => {
++      if (USE_MOCKS) return DEFAULT_NOTIFICATION_PREFERENCES;
++      const { data } = await api.get<NotificationPreferences>("/profile/notification-preferences");
++      return data;
++    },
++  });
++}
++
++export function useUpdateNotificationPreferences() {
++  const queryClient = useQueryClient();
++  return useMutation({
++    mutationFn: async (prefs: NotificationPreferences) => {
++      if (USE_MOCKS) {
++        await new Promise((r) => setTimeout(r, 300));
++        return prefs;
++      }
++      const { data } = await api.put("/profile/notification-preferences", prefs);
++      return data;
++    },
++    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["profile", "notification-preferences"] }),
++  });
++}
++
++export function useOpenQuestionReports() {
++  return useQuery<QuestionReport[]>({
++    queryKey: ["admin", "question-reports"],
++    queryFn: async () => {
++      if (USE_MOCKS) return mockOpenReports.filter((r) => !r.resolved);
++      const { data } = await api.get<QuestionReport[]>("/question-reports/open");
++      return data;
++    },
++  });
++}
++
++export function useResolveQuestionReport() {
++  const queryClient = useQueryClient();
++  return useMutation({
++    mutationFn: async ({ id, action }: { id: string; action: "Republish" | "KeepFlagged" }) => {
++      if (USE_MOCKS) {
++        const report = mockOpenReports.find((r) => r.id === id);
++        if (report) report.resolved = true;
++        await new Promise((r) => setTimeout(r, 300));
++        return;
++      }
++      await api.post(`/question-reports/${id}/resolve`, { action });
++    },
++    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["admin", "question-reports"] }),
++  });
++}
++
++export interface SubmitExamPayload {
++  certificationId: string;
++  mode: "Practice" | "MockExam";
++  durationSeconds: number;
++  answers: { questionId: string; selectedOptionId: string | null; wasFlaggedForReview: boolean }[];
++}
++
++/**
++ * Persists a practice or mock exam attempt to the backend so it counts toward the
++ * dashboard's stats, weak/strong topics, study streak, and the leaderboard. In mock
++ * mode, scores the answers against mockQuestions locally so the UI behaves the same
++ * way without a real backend.
++ */
++export function useSubmitExam() {
++  const queryClient = useQueryClient();
++  return useMutation({
++    mutationFn: async (payload: SubmitExamPayload): Promise<ExamSubmitResult> => {
++      if (USE_MOCKS) {
++        let correctCount = 0;
++        for (const answer of payload.answers) {
++          const question = mockQuestions.find((q) => q.id === answer.questionId);
++          const option = question?.options.find((o) => o.id === answer.selectedOptionId);
++          if (option?.isCorrect) correctCount++;
++        }
++        const totalQuestions = payload.answers.length;
++        const score = totalQuestions === 0 ? 0 : Math.round((correctCount / totalQuestions) * 100);
++        return {
++          attemptId: `mock-${Date.now()}`,
++          totalQuestions,
++          correctCount,
++          score,
++          passed: score >= 65,
++        };
++      }
++
++      const { data } = await api.post<ExamSubmitResult>("/exams/submit", payload);
++      return data;
++    },
++    onSuccess: () => {
++      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
++      queryClient.invalidateQueries({ queryKey: ["leaderboard"] });
++      queryClient.invalidateQueries({ queryKey: ["notifications"] });
++    },
++  });
++}
+diff --git a/frontend/src/pages/admin/Analytics.tsx b/frontend/src/pages/admin/Analytics.tsx
+index cae986f..c5089ba 100644
+--- a/frontend/src/pages/admin/Analytics.tsx
++++ b/frontend/src/pages/admin/Analytics.tsx
+@@ -1,2 +1,67 @@
+-import { useAdminAnalytics, useAdminOverview } from "../../hooks/useApiData"; import { Card, SectionHeading, StatCard } from "../../components/ui/Primitives"; import { RegistrationsChart } from "../../components/charts/RegistrationsChart";
+-export default function AdminAnalytics() { const overview = useAdminOverview(); const analytics = useAdminAnalytics(); if (overview.isLoading || analytics.isLoading) return <p>Loading analytics...</p>; if (!overview.data || !analytics.data) return <p className="text-state-error">Could not load analytics.</p>; return <div className="space-y-6"><SectionHeading title="Analytics" description="Live performance calculated from exam attempts"/><div className="grid grid-cols-2 md:grid-cols-3 gap-4"><StatCard label="Question accuracy" value={`${analytics.data.questionAccuracyPercent}%`} /><StatCard label="Avg. mock duration" value={`${analytics.data.averageMockExamDurationMinutes}m`} /><StatCard label="Most failed topic" value={analytics.data.mostFailedTopic} /></div><Card className="p-5"><SectionHeading title="Registrations by day"/><div className="h-64"><RegistrationsChart data={overview.data.registrationsByDay}/></div></Card></div>; }
++import { useAdminAnalytics } from "../../hooks/useApiData";
++import { Card, SectionHeading, StatCard } from "../../components/ui/Primitives";
++import { RegistrationsChart } from "../../components/charts/RegistrationsChart";
++import {
++  AdminAttemptActivityChart,
++  AdminCertificationPerformanceChart,
++  AdminFailedTopicsChart,
++  AdminRevenueChart,
++} from "../../components/charts/AdminAnalyticsCharts";
++
++export default function AdminAnalytics() {
++  const { data, isLoading, isError } = useAdminAnalytics();
++
++  if (isLoading) return <p>Loading analytics...</p>;
++  if (isError || !data) return <p className="text-state-error">Could not load analytics.</p>;
++
++  return (
++    <div className="space-y-6">
++      <SectionHeading title="Analytics" description="Live performance calculated from database records" />
++
++      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
++        <StatCard label="Total learners" value={data.totalLearners.toLocaleString()} />
++        <StatCard label="Active learners (30d)" value={data.activeLearners.toLocaleString()} />
++        <StatCard label="Questions answered" value={data.questionsAnswered.toLocaleString()} />
++        <StatCard label="Question accuracy" value={`${data.questionAccuracyPercent}%`} />
++        <StatCard label="Average score" value={`${data.averageScorePercent}%`} />
++        <StatCard label="Pass rate" value={`${data.passRatePercent}%`} />
++        <StatCard label="Mock exams completed" value={data.completedMockExams.toLocaleString()} />
++        <StatCard label="Practice sessions completed" value={data.completedPracticeSessions.toLocaleString()} />
++      </div>
++
++      <Card className="p-5">
++        <SectionHeading title="Learner registrations" description="New user registrations over the last 30 days" />
++        <div className="h-72"><RegistrationsChart data={data.registrationsByDay} /></div>
++      </Card>
++
++      <Card className="p-5">
++        <SectionHeading title="Practice vs mock exams" description="Completed sessions over the last 30 days" />
++        <div className="h-72"><AdminAttemptActivityChart data={data.attemptsByDay} /></div>
++      </Card>
++
++      <Card className="p-5">
++        <SectionHeading title="Certification performance" description="Completed attempts, pass rate and question accuracy" />
++        <div className="h-80"><AdminCertificationPerformanceChart data={data.certificationPerformance} /></div>
++      </Card>
++
++      <div className="grid lg:grid-cols-2 gap-6">
++        <Card className="p-5">
++          <SectionHeading title="Most failed topics" description="Topics with the most incorrect answers from completed attempts" />
++          <div className="h-80"><AdminFailedTopicsChart data={data.failedTopics} /></div>
++        </Card>
++
++        <Card className="p-5">
++          <SectionHeading title="Revenue" description="Paid transactions by calendar month for the last 12 months" />
++          <div className="h-80"><AdminRevenueChart data={data.revenueByMonth} /></div>
++        </Card>
++      </div>
++
++      <Card className="p-5">
++        <SectionHeading title="Analytics definition" description="All values on this page are calculated from persisted database records. No mock data is used by the admin analytics endpoint." />
++        <p className="text-sm text-muted-foreground">
++          Question accuracy is calculated from correct answers divided by answered questions. Pass rate is calculated from completed attempts that passed divided by all completed attempts. Revenue includes transactions whose status is Paid.
++        </p>
++      </Card>
++    </div>
++  );
++}

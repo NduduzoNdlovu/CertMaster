@@ -6,6 +6,8 @@ dotnet build
 cd src/CertMaster.Api
 $env:ASPNETCORE_ENVIRONMENT="Development"
 dotnet run
+
+dotnet run --project ".\src\CertMaster.Api\CertMaster.Api.csproj"
 ```
 
 ```powershell

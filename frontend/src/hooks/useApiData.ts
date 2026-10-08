@@ -1,7 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import {
-  mockAdminOverview,
   mockBookmarkedIds,
   mockCertifications,
   mockLeaderboard,
@@ -37,7 +36,30 @@ export function useSetUserSuspended() { const qc = useQueryClient(); return useM
 export function useAdminLogs(page = 1, search = "", level = "") { return useQuery<PagedResult<AuditLog>>({ queryKey: ["admin", "logs", page, search, level], queryFn: async () => (await api.get("/admin/logs", { params: { page, search: search || undefined, level: level || undefined } })).data }); }
 export function useAdminPayments() { return useQuery<Payment[]>({ queryKey: ["admin", "payments"], queryFn: async () => (await api.get("/admin/payments")).data }); }
 export function usePaymentSummary() { return useQuery<{ monthlyRevenue: number; activeSubscriptions: number; monthlyPlans: number; yearlyPlans: number }>({ queryKey: ["admin", "payment-summary"], queryFn: async () => (await api.get("/admin/payment-summary")).data }); }
-export function useAdminAnalytics() { return useQuery<{ questionAccuracyPercent: number; averageMockExamDurationMinutes: number; mostFailedTopic: string }>({ queryKey: ["admin", "analytics"], queryFn: async () => (await api.get("/admin/analytics")).data }); }
+export interface AdminAnalytics {
+  totalLearners: number;
+  activeLearners: number;
+  questionsAnswered: number;
+  questionAccuracyPercent: number;
+  averageScorePercent: number;
+  passRatePercent: number;
+  completedMockExams: number;
+  completedPracticeSessions: number;
+  averageMockExamDurationMinutes: number;
+  mostFailedTopic: string;
+  registrationsByDay: { date: string; count: number }[];
+  attemptsByDay: { date: string; practice: number; mockExam: number }[];
+  certificationPerformance: { certificationId: string; certification: string; completedAttempts: number; passRatePercent: number; accuracyPercent: number }[];
+  failedTopics: { topic: string; incorrectAnswers: number }[];
+  revenueByMonth: { month: string; revenue: number }[];
+}
+
+export function useAdminAnalytics() {
+  return useQuery<AdminAnalytics>({
+    queryKey: ["admin", "analytics"],
+    queryFn: async () => (await api.get<AdminAnalytics>("/admin/analytics")).data,
+  });
+}
 export function useStartExam() { return useMutation({ mutationFn: async (payload: { certificationId: string; mode: "Practice" | "MockExam" }) => (await api.post<ExamSession>("/exams/start", payload)).data }); }
 export function useSaveExamAnswer() { return useMutation({ mutationFn: async (p: { attemptId: string; questionId: string; selectedOptionId: string | null; wasFlaggedForReview: boolean }) => api.put(`/exams/${p.attemptId}/answers/${p.questionId}`, { selectedOptionId: p.selectedOptionId, wasFlaggedForReview: p.wasFlaggedForReview }) }); }
 export function useSubmitPracticeAnswer() {
@@ -110,11 +132,7 @@ export function useCancelMaintenanceWindow() {
 export function useAdminOverview() {
   return useQuery<AdminOverview>({
     queryKey: ["admin", "overview"],
-    queryFn: async () => {
-      if (USE_MOCKS) return mockAdminOverview;
-      const { data } = await api.get<AdminOverview>("/admin/overview");
-      return data;
-    },
+    queryFn: async () => (await api.get<AdminOverview>("/admin/overview")).data,
   });
 }
 

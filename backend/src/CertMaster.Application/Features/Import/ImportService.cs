@@ -451,17 +451,37 @@ public class ImportService
         question.QuestionType = string.IsNullOrWhiteSpace(request.QuestionType) ? "Choice" : request.QuestionType.Trim();
         question.RequiresManualReview = request.RequiresManualReview;
 
-        // Replace options wholesale — simplest correct approach for admin corrections.
-        _db.ImportedQuestionOptions.RemoveRange(question.Options);
-        question.Options.Clear();
-        for (var i = 0; i < request.Options.Count; i++)
+        // Update tracked options in place wherever possible. Avoid deleting and recreating
+        // the entire collection on every save, which can trigger PostgreSQL concurrency
+        // failures if a tracked option row has already disappeared.
+        var existingOptions = question.Options.OrderBy(o => o.SortOrder).ToList();
+        var requestedOptions = request.Options ?? new List<UpdateImportedQuestionOptionRequest>();
+
+        for (var i = 0; i < requestedOptions.Count; i++)
         {
-            question.Options.Add(new ImportedQuestionOption
+            var requested = requestedOptions[i];
+            if (i < existingOptions.Count)
             {
-                Text = TextNormalizer.NormalizeText(request.Options[i].Text),
-                IsCorrect = request.Options[i].IsCorrect,
-                SortOrder = i + 1,
-            });
+                var existing = existingOptions[i];
+                existing.Text = TextNormalizer.NormalizeText(requested.Text);
+                existing.IsCorrect = requested.IsCorrect;
+                existing.SortOrder = i + 1;
+            }
+            else
+            {
+                question.Options.Add(new ImportedQuestionOption
+                {
+                    Text = TextNormalizer.NormalizeText(requested.Text),
+                    IsCorrect = requested.IsCorrect,
+                    SortOrder = i + 1,
+                });
+            }
+        }
+
+        foreach (var surplus in existingOptions.Skip(requestedOptions.Count))
+        {
+            question.Options.Remove(surplus);
+            _db.ImportedQuestionOptions.Remove(surplus);
         }
 
         // Re-run basic validation now that the admin has corrected the content.

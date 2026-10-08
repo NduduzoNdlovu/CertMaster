@@ -1,0 +1,259 @@
+diff --git a/backend/src/CertMaster.Application/Features/Admin/AdminService.cs b/backend/src/CertMaster.Application/Features/Admin/AdminService.cs
+index cf04cca..2154919 100644
+--- a/backend/src/CertMaster.Application/Features/Admin/AdminService.cs
++++ b/backend/src/CertMaster.Application/Features/Admin/AdminService.cs
+@@ -146,110 +146,106 @@ public class AdminService
+         var today = now.Date;
+         var activityStart = today.AddDays(-29);
+         var firstRevenueMonth = new DateTime(now.Year, now.Month, 1, 0, 0, 0, DateTimeKind.Utc).AddMonths(-11);
+-        var completedAttempts = _db.ExamAttempts.AsNoTracking().Where(a => a.CompletedAtUtc != null);
+-        var answers = _db.ExamAnswers.AsNoTracking();
+ 
++        // Keep database-side queries to simple filtering/projection. Aggregate and DTO
++        // shaping happens after materialization so provider-specific GroupBy/record
++        // projection translation cannot turn the analytics endpoint into a 400.
+         var totalLearners = await _db.Users.CountAsync(u => u.Role == UserRole.Learner, ct);
+         var activeLearners = await _db.Users.CountAsync(
+             u => u.Role == UserRole.Learner && u.LastActivityAtUtc >= now.AddDays(-30), ct);
+-        var answered = answers.Where(a => a.SelectedOptionId != null);
+-        var questionsAnswered = await answered.CountAsync(ct);
+-        var correctAnswers = await answered.CountAsync(a => a.IsCorrect, ct);
+-        var questionAccuracy = questionsAnswered == 0 ? 0m : Math.Round(correctAnswers * 100m / questionsAnswered, 1);
+-
+-        var averageScore = await completedAttempts.Select(a => (double?)a.Score).AverageAsync(ct) ?? 0;
+-        var completedCount = await completedAttempts.CountAsync(ct);
+-        var passedCount = await completedAttempts.CountAsync(a => a.Passed, ct);
+-        var passRate = completedCount == 0 ? 0m : Math.Round(passedCount * 100m / completedCount, 1);
+-        var completedMockExams = await completedAttempts.CountAsync(a => a.Mode == ExamMode.MockExam, ct);
+-        var completedPracticeSessions = await completedAttempts.CountAsync(a => a.Mode == ExamMode.Practice, ct);
+-        var averageMockDurationSeconds = await completedAttempts
+-            .Where(a => a.Mode == ExamMode.MockExam)
+-            .Select(a => (double?)a.DurationSeconds)
+-            .AverageAsync(ct) ?? 0;
+ 
+-        var registrationCounts = await _db.Users
++        var registrations = await _db.Users.AsNoTracking()
+             .Where(u => u.CreatedAtUtc >= activityStart)
+-            .GroupBy(u => u.CreatedAtUtc.Date)
+-            .Select(g => new { Date = g.Key, Count = g.Count() })
++            .Select(u => u.CreatedAtUtc)
+             .ToListAsync(ct);
+         var registrationsByDay = Enumerable.Range(0, 30)
+             .Select(offset => activityStart.AddDays(offset))
+             .Select(date => new RegistrationByDayDto(
+-                date.ToString("yyyy-MM-dd"),
+-                registrationCounts.FirstOrDefault(x => x.Date == date)?.Count ?? 0))
++                date.ToString("yyyy-MM-dd"), registrations.Count(created => created.Date == date)))
+             .ToList();
+ 
+-        var attemptCounts = await completedAttempts
+-            .Where(a => a.CompletedAtUtc >= activityStart)
+-            .GroupBy(a => new { Date = a.CompletedAtUtc!.Value.Date, a.Mode })
+-            .Select(g => new { g.Key.Date, g.Key.Mode, Count = g.Count() })
++        var attempts = await _db.ExamAttempts.AsNoTracking()
++            .Where(a => a.CompletedAtUtc != null)
++            .Select(a => new
++            {
++                a.CertificationId,
++                Certification = a.Certification == null ? "Unknown" : a.Certification.Name,
++                a.Mode,
++                a.StartedAtUtc,
++                CompletedAtUtc = a.CompletedAtUtc!.Value,
++                a.DurationSeconds,
++                a.Score,
++                a.Passed
++            })
+             .ToListAsync(ct);
+-        var attemptsByDay = Enumerable.Range(0, 30)
+-            .Select(offset => activityStart.AddDays(offset))
+-            .Select(date => new AnalyticsActivityByDayDto(
+-                date.ToString("yyyy-MM-dd"),
+-                attemptCounts.FirstOrDefault(x => x.Date == date && x.Mode == ExamMode.Practice)?.Count ?? 0,
+-                attemptCounts.FirstOrDefault(x => x.Date == date && x.Mode == ExamMode.MockExam)?.Count ?? 0))
+-            .ToList();
+ 
+-        var certificationAttempts = await completedAttempts
+-            .GroupBy(a => new { a.CertificationId, CertificationName = a.Certification!.Name })
+-            .Select(g => new
++        var answers = await _db.ExamAnswers.AsNoTracking()
++            .Where(a => a.SelectedOptionId != null)
++            .Select(a => new
+             {
+-                g.Key.CertificationId,
+-                g.Key.CertificationName,
+-                CompletedAttempts = g.Count(),
+-                Passed = g.Count(a => a.Passed),
+-                AverageScore = g.Average(a => (double)a.Score)
++                a.IsCorrect,
++                Topic = a.Question == null ? "Unknown" : a.Question.Topic,
++                CertificationId = a.ExamAttempt == null ? Guid.Empty : a.ExamAttempt.CertificationId,
++                Certification = a.ExamAttempt == null || a.ExamAttempt.Certification == null
++                    ? "Unknown" : a.ExamAttempt.Certification.Name,
++                AttemptCompleted = a.ExamAttempt != null && a.ExamAttempt.CompletedAtUtc != null
+             })
+-            .OrderByDescending(x => x.CompletedAttempts)
+-            .Take(15)
+             .ToListAsync(ct);
+ 
+-        var certificationAnswerStats = await answers
+-            .Where(a => a.ExamAttempt != null && a.ExamAttempt.CompletedAtUtc != null)
+-            .GroupBy(a => new { a.ExamAttempt!.CertificationId, CertificationName = a.ExamAttempt.Certification!.Name })
+-            .Select(g => new { g.Key.CertificationId, g.Key.CertificationName, Correct = g.Count(a => a.IsCorrect), Total = g.Count() })
+-            .ToListAsync(ct);
++        var questionsAnswered = answers.Count;
++        var correctAnswers = answers.Count(a => a.IsCorrect);
++        var questionAccuracy = questionsAnswered == 0 ? 0m : Math.Round(correctAnswers * 100m / questionsAnswered, 1);
++        var averageScore = attempts.Count == 0 ? 0m : (decimal)attempts.Average(a => a.Score);
++        var passRate = attempts.Count == 0 ? 0m : Math.Round(attempts.Count(a => a.Passed) * 100m / attempts.Count, 1);
++        var completedMockExams = attempts.Count(a => a.Mode == ExamMode.MockExam);
++        var completedPracticeSessions = attempts.Count(a => a.Mode == ExamMode.Practice);
++        var mockAttempts = attempts.Where(a => a.Mode == ExamMode.MockExam).ToList();
++        var averageMockDurationMinutes = mockAttempts.Count == 0 ? 0m : (decimal)mockAttempts.Average(a => a.DurationSeconds) / 60m;
+ 
+-        var certificationPerformance = certificationAttempts
+-            .Select(item =>
++        var attemptsByDay = Enumerable.Range(0, 30)
++            .Select(offset => activityStart.AddDays(offset))
++            .Select(date => new AnalyticsActivityByDayDto(
++                date.ToString("yyyy-MM-dd"),
++                attempts.Count(a => a.CompletedAtUtc.Date == date && a.Mode == ExamMode.Practice),
++                attempts.Count(a => a.CompletedAtUtc.Date == date && a.Mode == ExamMode.MockExam)))
++            .ToList();
++
++        var certificationPerformance = attempts
++            .GroupBy(a => new { a.CertificationId, a.Certification })
++            .Select(group =>
+             {
+-                var answerStats = certificationAnswerStats.FirstOrDefault(x =>
+-                    x.CertificationId == item.CertificationId);
+-                var accuracy = answerStats is null || answerStats.Total == 0
+-                    ? 0m
+-                    : Math.Round(answerStats.Correct * 100m / answerStats.Total, 1);
++                var completedAnswers = answers.Where(a => a.AttemptCompleted && a.CertificationId == group.Key.CertificationId).ToList();
++                var accuracy = completedAnswers.Count == 0 ? 0m : Math.Round(completedAnswers.Count(a => a.IsCorrect) * 100m / completedAnswers.Count, 1);
+                 return new AnalyticsCertificationDto(
+-                    item.CertificationId,
+-                    item.CertificationName,
+-                    item.CompletedAttempts,
+-                    Math.Round(item.Passed * 100m / item.CompletedAttempts, 1),
++                    group.Key.CertificationId,
++                    group.Key.Certification,
++                    group.Count(),
++                    Math.Round(group.Count(a => a.Passed) * 100m / group.Count(), 1),
+                     accuracy);
+             })
++            .OrderByDescending(item => item.CompletedAttempts)
++            .Take(15)
+             .ToList();
+ 
+-        var failedTopics = await answers
+-            .Where(a => a.SelectedOptionId != null && !a.IsCorrect && a.Question != null && a.ExamAttempt != null && a.ExamAttempt.CompletedAtUtc != null)
+-            .GroupBy(a => a.Question!.Topic)
+-            .Select(g => new AnalyticsTopicDto(g.Key, g.Count()))
+-            .OrderByDescending(x => x.IncorrectAnswers)
+-            .ThenBy(x => x.Topic)
++        var failedTopics = answers
++            .Where(a => a.AttemptCompleted && !a.IsCorrect)
++            .GroupBy(a => a.Topic)
++            .Select(group => new AnalyticsTopicDto(group.Key, group.Count()))
++            .OrderByDescending(item => item.IncorrectAnswers)
++            .ThenBy(item => item.Topic)
+             .Take(10)
+-            .ToListAsync(ct);
++            .ToList();
+ 
+-        var revenueRows = await _db.PaymentTransactions
+-            .AsNoTracking()
++        var revenueRows = await _db.PaymentTransactions.AsNoTracking()
+             .Where(p => p.Status == "Paid" && p.CreatedAtUtc >= firstRevenueMonth)
+-            .GroupBy(p => new { p.CreatedAtUtc.Year, p.CreatedAtUtc.Month })
+-            .Select(g => new { g.Key.Year, g.Key.Month, Revenue = g.Sum(p => p.AmountZar) })
++            .Select(p => new { p.CreatedAtUtc, p.AmountZar })
+             .ToListAsync(ct);
+         var revenueByMonth = Enumerable.Range(0, 12)
+             .Select(offset => firstRevenueMonth.AddMonths(offset))
+             .Select(month => new AnalyticsRevenueByMonthDto(
+                 month.ToString("yyyy-MM"),
+-                revenueRows.FirstOrDefault(x => x.Year == month.Year && x.Month == month.Month)?.Revenue ?? 0))
++                revenueRows.Where(row => row.CreatedAtUtc.Year == month.Year && row.CreatedAtUtc.Month == month.Month)
++                    .Sum(row => row.AmountZar)))
+             .ToList();
+ 
+         return new AdminAnalyticsDto(
+@@ -257,11 +253,11 @@ public class AdminService
+             activeLearners,
+             questionsAnswered,
+             questionAccuracy,
+-            Math.Round((decimal)averageScore, 1),
++            Math.Round(averageScore, 1),
+             passRate,
+             completedMockExams,
+             completedPracticeSessions,
+-            Math.Round((decimal)averageMockDurationSeconds / 60m, 1),
++            Math.Round(averageMockDurationMinutes, 1),
+             failedTopics.FirstOrDefault()?.Topic ?? "No data",
+             registrationsByDay,
+             attemptsByDay,
+@@ -269,4 +265,5 @@ public class AdminService
+             failedTopics,
+             revenueByMonth);
+     }
++
+ }
+diff --git a/backend/src/CertMaster.Application/Features/Import/ImportService.cs b/backend/src/CertMaster.Application/Features/Import/ImportService.cs
+index f7a6d8b..2a014b0 100644
+--- a/backend/src/CertMaster.Application/Features/Import/ImportService.cs
++++ b/backend/src/CertMaster.Application/Features/Import/ImportService.cs
+@@ -451,19 +451,39 @@ public class ImportService
+         question.QuestionType = string.IsNullOrWhiteSpace(request.QuestionType) ? "Choice" : request.QuestionType.Trim();
+         question.RequiresManualReview = request.RequiresManualReview;
+ 
+-        // Replace options wholesale — simplest correct approach for admin corrections.
+-        _db.ImportedQuestionOptions.RemoveRange(question.Options);
+-        question.Options.Clear();
+-        for (var i = 0; i < request.Options.Count; i++)
+-        {
+-            question.Options.Add(new ImportedQuestionOption
+-            {
+-                Text = TextNormalizer.NormalizeText(request.Options[i].Text),
+-                IsCorrect = request.Options[i].IsCorrect,
+-                SortOrder = i + 1,
+-            });
+-        }
+-
++        // Update tracked options in place wherever possible. Avoid deleting and recreating
++        // the entire collection on every save, which can trigger PostgreSQL concurrency
++        // failures if a tracked option row has already disappeared.
++        var existingOptions = question.Options.OrderBy(o => o.SortOrder).ToList();
++        var requestedOptions = request.Options ?? new List<UpdateImportedQuestionOptionRequest>();
++
++        for (var i = 0; i < requestedOptions.Count; i++)
++        {
++            var requested = requestedOptions[i];
++            if (i < existingOptions.Count)
++            {
++                var existing = existingOptions[i];
++                existing.Text = TextNormalizer.NormalizeText(requested.Text);
++                existing.IsCorrect = requested.IsCorrect;
++                existing.SortOrder = i + 1;
++            }
++            else
++            {
++                question.Options.Add(new ImportedQuestionOption
++                {
++                    Text = TextNormalizer.NormalizeText(requested.Text),
++                    IsCorrect = requested.IsCorrect,
++                    SortOrder = i + 1,
++                });
++            }
++        }
++
++        foreach (var surplus in existingOptions.Skip(requestedOptions.Count))
++        {
++            question.Options.Remove(surplus);
++            _db.ImportedQuestionOptions.Remove(surplus);
++        }
++
+         // Re-run basic validation now that the admin has corrected the content.
+         var issues = new List<string>();
+         var nonEmptyOptions = question.Options.Count(o => !string.IsNullOrWhiteSpace(o.Text));
