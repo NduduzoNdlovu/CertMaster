@@ -227,7 +227,8 @@ var attempt = new ExamAttempt
 
     private async Task<ExamAttempt?> LoadActiveAttemptAsync(Guid userId, Guid certificationId, ExamMode mode, CancellationToken ct) =>
         await _db.ExamAttempts.Include(a => a.Certification).Include(a => a.Answers).ThenInclude(a => a.Question).ThenInclude(q => q!.Options)
-            .FirstOrDefaultAsync(a => a.UserId == userId && a.CertificationId == certificationId && a.Mode == mode && a.CompletedAtUtc == null, ct);
+            .FirstOrDefaultAsync(a => a.UserId == userId && a.Mode == mode && a.CompletedAtUtc == null &&
+                (mode == ExamMode.MockExam || a.CertificationId == certificationId), ct);
 
     private async Task<ExamAttempt?> LoadAttemptAsync(Guid attemptId, Guid userId, CancellationToken ct) =>
         await _db.ExamAttempts.Include(a => a.Certification).Include(a => a.Answers).ThenInclude(a => a.Question).ThenInclude(q => q!.Options)

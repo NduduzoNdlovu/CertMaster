@@ -1,0 +1,27 @@
+diff --git a/CertMaster/backend/src/CertMaster.Application/Features/Exams/ExamService.cs b/CertMaster/backend/src/CertMaster.Application/Features/Exams/ExamService.cs
+index b517007..33e68aa 100644
+--- a/CertMaster/backend/src/CertMaster.Application/Features/Exams/ExamService.cs
++++ b/CertMaster/backend/src/CertMaster.Application/Features/Exams/ExamService.cs
+@@ -216,7 +216,8 @@ public class ExamService
+ 
+     private async Task<ExamAttempt?> LoadActiveAttemptAsync(Guid userId, Guid certificationId, ExamMode mode, CancellationToken ct) =>
+         await _db.ExamAttempts.Include(a => a.Certification).Include(a => a.Answers).ThenInclude(a => a.Question).ThenInclude(q => q!.Options)
+-            .FirstOrDefaultAsync(a => a.UserId == userId && a.CertificationId == certificationId && a.Mode == mode && a.CompletedAtUtc == null, ct);
++            .FirstOrDefaultAsync(a => a.UserId == userId && a.Mode == mode && a.CompletedAtUtc == null &&
++                (mode == ExamMode.MockExam || a.CertificationId == certificationId), ct);
+ 
+     private async Task<ExamAttempt?> LoadAttemptAsync(Guid attemptId, Guid userId, CancellationToken ct) =>
+         await _db.ExamAttempts.Include(a => a.Certification).Include(a => a.Answers).ThenInclude(a => a.Question).ThenInclude(q => q!.Options)
+diff --git a/CertMaster/frontend/vite.config.ts b/CertMaster/frontend/vite.config.ts
+index a7d836b..fecc00a 100644
+--- a/CertMaster/frontend/vite.config.ts
++++ b/CertMaster/frontend/vite.config.ts
+@@ -9,7 +9,7 @@ export default defineConfig({
+     port: 5173,
+     proxy: {
+       '/api': {
+-        target: 'https://localhost:5000',
++        target: 'http://localhost:5000',
+         changeOrigin: true,
+         secure: false,
+       },
