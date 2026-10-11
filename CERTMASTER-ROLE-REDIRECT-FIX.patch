@@ -1,0 +1,63 @@
+diff --git a/frontend/src/context/AuthContext.tsx b/frontend/src/context/AuthContext.tsx
+index 5db0d86..174d6e2 100644
+--- a/frontend/src/context/AuthContext.tsx
++++ b/frontend/src/context/AuthContext.tsx
+@@ -7,7 +7,7 @@ const USE_MOCKS = import.meta.env.DEV && import.meta.env.VITE_USE_MOCKS === "tru
+ interface AuthContextValue {
+   user: AuthUser | null;
+   isLoading: boolean;
+-  login: (email: string, password: string) => Promise<void>;
++  login: (email: string, password: string) => Promise<AuthUser>;
+   register: (fullName: string, email: string, password: string) => Promise<void>;
+   logout: () => void;
+ }
+@@ -50,15 +50,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
+     bootstrap();
+   }, []);
+ 
+-  const login = async (email: string, password: string) => {
++  const login = async (email: string, password: string): Promise<AuthUser> => {
+     if (USE_MOCKS) {
+       tokenStorage.setTokens("mock-access-token", "mock-refresh-token");
+-      setUser({ ...MOCK_USER, email });
+-      return;
++      const mockUser = { ...MOCK_USER, email };
++      setUser(mockUser);
++      return mockUser;
+     }
+-    const { data } = await api.post("/auth/login", { email, password });
++    const { data } = await api.post<{ accessToken: string; refreshToken: string; user: AuthUser }>("/auth/login", { email, password });
+     tokenStorage.setTokens(data.accessToken, data.refreshToken);
+     setUser(data.user);
++    return data.user;
+   };
+ 
+   const register = async (fullName: string, email: string, password: string) => {
+diff --git a/frontend/src/pages/auth/Login.tsx b/frontend/src/pages/auth/Login.tsx
+index 1219a57..ca62101 100644
+--- a/frontend/src/pages/auth/Login.tsx
++++ b/frontend/src/pages/auth/Login.tsx
+@@ -29,8 +29,8 @@ export default function Login() {
+   const onSubmit = async (values: FormValues) => {
+     setServerError(null);
+     try {
+-      await login(values.email, values.password);
+-      navigate("/dashboard");
++      const user = await login(values.email, values.password);
++      navigate(user.role === "Administrator" ? "/admin" : "/dashboard", { replace: true });
+     } catch {
+       setServerError("Incorrect email or password. Please try again.");
+     }
+diff --git a/frontend/src/routes/ProtectedRoute.tsx b/frontend/src/routes/ProtectedRoute.tsx
+index 5ff7c85..9ef5fd8 100644
+--- a/frontend/src/routes/ProtectedRoute.tsx
++++ b/frontend/src/routes/ProtectedRoute.tsx
+@@ -15,7 +15,7 @@ export function ProtectedRoute({ children, requiredRole }: { children: ReactNode
+   }
+ 
+   if (requiredRole && user.role !== requiredRole) {
+-    return <Navigate to="/dashboard" replace />;
++    return <Navigate to={user.role === "Administrator" ? "/admin" : "/dashboard"} replace />;
+   }
+ 
+   return <>{children}</>;

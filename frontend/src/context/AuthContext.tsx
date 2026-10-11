@@ -7,7 +7,7 @@ const USE_MOCKS = import.meta.env.DEV && import.meta.env.VITE_USE_MOCKS === "tru
 interface AuthContextValue {
   user: AuthUser | null;
   isLoading: boolean;
-  login: (email: string, password: string) => Promise<void>;
+  login: (email: string, password: string) => Promise<AuthUser>;
   register: (fullName: string, email: string, password: string) => Promise<void>;
   logout: () => void;
 }
@@ -50,15 +50,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     bootstrap();
   }, []);
 
-  const login = async (email: string, password: string) => {
+  const login = async (email: string, password: string): Promise<AuthUser> => {
     if (USE_MOCKS) {
       tokenStorage.setTokens("mock-access-token", "mock-refresh-token");
-      setUser({ ...MOCK_USER, email });
-      return;
+      const mockUser = { ...MOCK_USER, email };
+      setUser(mockUser);
+      return mockUser;
     }
-    const { data } = await api.post("/auth/login", { email, password });
+    const { data } = await api.post<{ accessToken: string; refreshToken: string; user: AuthUser }>("/auth/login", { email, password });
     tokenStorage.setTokens(data.accessToken, data.refreshToken);
     setUser(data.user);
+    return data.user;
   };
 
   const register = async (fullName: string, email: string, password: string) => {

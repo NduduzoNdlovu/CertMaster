@@ -29,8 +29,8 @@ export default function Login() {
   const onSubmit = async (values: FormValues) => {
     setServerError(null);
     try {
-      await login(values.email, values.password);
-      navigate("/dashboard");
+      const user = await login(values.email, values.password);
+      navigate(user.role === "Administrator" ? "/admin" : "/dashboard", { replace: true });
     } catch {
       setServerError("Incorrect email or password. Please try again.");
     }
