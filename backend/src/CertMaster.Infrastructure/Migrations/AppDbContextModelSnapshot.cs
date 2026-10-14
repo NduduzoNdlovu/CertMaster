@@ -22,6 +22,58 @@ namespace CertMaster.Infrastructure.Migrations
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
 
+            modelBuilder.Entity("CertMaster.Domain.Entities.AchievementCertificate", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("CertificationId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("ExamAttemptId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("IssuedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime?>("ModifiedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("ScorePercent")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Tier")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("VerificationCode")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CertificationId");
+
+                    b.HasIndex("ExamAttemptId")
+                        .IsUnique();
+
+                    b.HasIndex("VerificationCode")
+                        .IsUnique();
+
+                    b.HasIndex("UserId", "IssuedAtUtc");
+
+                    b.ToTable("AchievementCertificates");
+                });
+
             modelBuilder.Entity("CertMaster.Domain.Entities.AuditLogEntry", b =>
                 {
                     b.Property<Guid>("Id")
@@ -109,11 +161,11 @@ namespace CertMaster.Infrastructure.Migrations
                     b.Property<bool>("IsActive")
                         .HasColumnType("boolean");
 
-                    b.Property<DateTime?>("ModifiedAtUtc")
-                        .HasColumnType("timestamp with time zone");
-
                     b.Property<int>("MockExamQuestionCount")
                         .HasColumnType("integer");
+
+                    b.Property<DateTime?>("ModifiedAtUtc")
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Name")
                         .IsRequired()
@@ -311,12 +363,12 @@ namespace CertMaster.Infrastructure.Migrations
                     b.Property<DateTime>("CreatedAtUtc")
                         .HasColumnType("timestamp with time zone");
 
-                    b.Property<Guid>("ImportJobId")
-                        .HasColumnType("uuid");
-
                     b.Property<string>("ImageKind")
                         .IsRequired()
                         .HasColumnType("text");
+
+                    b.Property<Guid>("ImportJobId")
+                        .HasColumnType("uuid");
 
                     b.Property<Guid?>("ImportedQuestionId")
                         .HasColumnType("uuid");
@@ -388,17 +440,11 @@ namespace CertMaster.Infrastructure.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
-                    b.Property<bool>("RequiresManualReview")
-                        .HasColumnType("boolean");
-
-                    b.Property<int?>("SourcePageEnd")
-                        .HasColumnType("integer");
-
-                    b.Property<int?>("SourcePageStart")
-                        .HasColumnType("integer");
-
                     b.Property<string>("Reference")
                         .HasColumnType("text");
+
+                    b.Property<bool>("RequiresManualReview")
+                        .HasColumnType("boolean");
 
                     b.Property<string>("ReviewNotes")
                         .HasColumnType("text");
@@ -411,6 +457,12 @@ namespace CertMaster.Infrastructure.Migrations
 
                     b.Property<Guid?>("ReviewedByUserId")
                         .HasColumnType("uuid");
+
+                    b.Property<int?>("SourcePageEnd")
+                        .HasColumnType("integer");
+
+                    b.Property<int?>("SourcePageStart")
+                        .HasColumnType("integer");
 
                     b.Property<string>("Subtopic")
                         .HasColumnType("text");
@@ -693,11 +745,11 @@ namespace CertMaster.Infrastructure.Migrations
                     b.Property<DateTime>("CreatedAtUtc")
                         .HasColumnType("timestamp with time zone");
 
-                    b.Property<bool>("IsCorrect")
-                        .HasColumnType("boolean");
-
                     b.Property<string>("ImageUrl")
                         .HasColumnType("text");
+
+                    b.Property<bool>("IsCorrect")
+                        .HasColumnType("boolean");
 
                     b.Property<DateTime?>("ModifiedAtUtc")
                         .HasColumnType("timestamp with time zone");
@@ -888,6 +940,33 @@ namespace CertMaster.Infrastructure.Migrations
                     b.ToTable("Users");
                 });
 
+            modelBuilder.Entity("CertMaster.Domain.Entities.AchievementCertificate", b =>
+                {
+                    b.HasOne("CertMaster.Domain.Entities.Certification", "Certification")
+                        .WithMany()
+                        .HasForeignKey("CertificationId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("CertMaster.Domain.Entities.ExamAttempt", "ExamAttempt")
+                        .WithMany()
+                        .HasForeignKey("ExamAttemptId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("CertMaster.Domain.Entities.User", "User")
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Certification");
+
+                    b.Navigation("ExamAttempt");
+
+                    b.Navigation("User");
+                });
+
             modelBuilder.Entity("CertMaster.Domain.Entities.Bookmark", b =>
                 {
                     b.HasOne("CertMaster.Domain.Entities.Question", "Question")
@@ -1007,8 +1086,6 @@ namespace CertMaster.Infrastructure.Migrations
                     b.Navigation("ImportJob");
 
                     b.Navigation("QuestionBankVersion");
-
-                    b.Navigation("Images");
                 });
 
             modelBuilder.Entity("CertMaster.Domain.Entities.ImportedQuestionOption", b =>
@@ -1141,6 +1218,8 @@ namespace CertMaster.Infrastructure.Migrations
 
             modelBuilder.Entity("CertMaster.Domain.Entities.ImportedQuestion", b =>
                 {
+                    b.Navigation("Images");
+
                     b.Navigation("Options");
                 });
 

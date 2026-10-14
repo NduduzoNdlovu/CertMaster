@@ -20,6 +20,8 @@ import Premium from "./pages/learner/Premium";
 import Settings from "./pages/learner/Settings";
 import Help from "./pages/learner/Help";
 import Notifications from "./pages/learner/Notifications";
+import AchievementCertificates from "./pages/learner/AchievementCertificates";
+import VerifyAchievementCertificate from "./pages/learner/VerifyAchievementCertificate";
 
 import AdminDashboard from "./pages/admin/AdminDashboard";
 import AdminUsers from "./pages/admin/Users";
@@ -47,6 +49,7 @@ export default function App() {
         <Route path="/register" element={<Register />} />
         <Route path="/forgot-password" element={<ForgotPassword />} />
         <Route path="/reset-password" element={<ResetPassword />} />
+        <Route path="/verify-certificate/:code" element={<VerifyAchievementCertificate />} />
 
         {/* Learner routes */}
         <Route
@@ -69,6 +72,7 @@ export default function App() {
           <Route path="/settings" element={<Settings />} />
           <Route path="/help" element={<Help />} />
           <Route path="/notifications" element={<Notifications />} />
+          <Route path="/my-certificates" element={<AchievementCertificates />} />
         </Route>
 
         {/* Administrator routes */}

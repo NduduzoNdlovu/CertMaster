@@ -34,6 +34,7 @@ const learnerNav = [
   { to: "/bookmarks", label: "Bookmarks", icon: Bookmark },
   { to: "/flashcards", label: "Flashcards", icon: Layers },
   { to: "/certifications", label: "Certifications", icon: Award },
+  { to: "/my-certificates", label: "My Certificates", icon: Award },
   { to: "/leaderboard", label: "Leaderboard", icon: Trophy },
   { to: "/premium", label: "Premium", icon: Crown },
   { to: "/notifications", label: "Notifications", icon: Bell },

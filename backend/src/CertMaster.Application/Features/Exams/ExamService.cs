@@ -99,6 +99,11 @@ public class ExamService
         }
 
         await _db.SaveChangesAsync(ct);
+        if (attempt.Mode == ExamMode.MockExam)
+        {
+            await AddAchievementCertificateIfEligibleAsync(attempt, ct);
+            await _db.SaveChangesAsync(ct);
+        }
 
         return new ExamResultDto(attempt.Id, attempt.TotalQuestions, attempt.CorrectCount, attempt.Score, attempt.Passed);
     }
@@ -248,6 +253,11 @@ var attempt = new ExamAttempt
         attempt.DurationSeconds = Math.Max(0, (int)(attempt.CompletedAtUtc.Value - attempt.StartedAtUtc).TotalSeconds);
         await UpdateStudyStreakAsync(attempt.UserId, ct);
         await _db.SaveChangesAsync(ct);
+        if (attempt.Mode == ExamMode.MockExam)
+        {
+            await AddAchievementCertificateIfEligibleAsync(attempt, ct);
+            await _db.SaveChangesAsync(ct);
+        }
     }
 
     private static ExamSessionDto ToSession(ExamAttempt attempt)
@@ -300,6 +310,22 @@ var attempt = new ExamAttempt
     /// a gap of more than one day. This is the single place streak logic lives, so any future
     /// activity type (not just exam submissions) can call it the same way.
     /// </summary>
+    private async Task AddAchievementCertificateIfEligibleAsync(ExamAttempt attempt, CancellationToken ct)
+    {
+        if (attempt.Score < 75 || await _db.AchievementCertificates.AnyAsync(c => c.ExamAttemptId == attempt.Id, ct)) return;
+        var tier = attempt.Score <= 85 ? "Good" : attempt.Score <= 95 ? "Very Good" : "Excellent";
+        _db.AchievementCertificates.Add(new AchievementCertificate
+        {
+            UserId = attempt.UserId,
+            CertificationId = attempt.CertificationId,
+            ExamAttemptId = attempt.Id,
+            ScorePercent = attempt.Score,
+            Tier = tier,
+            VerificationCode = Guid.NewGuid().ToString("N").ToUpperInvariant(),
+            IssuedAtUtc = DateTime.UtcNow
+        });
+    }
+
     private async Task UpdateStudyStreakAsync(Guid userId, CancellationToken ct)
     {
         var user = await _db.Users.FirstOrDefaultAsync(u => u.Id == userId, ct);

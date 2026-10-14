@@ -19,6 +19,7 @@ public class AppDbContext : DbContext, IApplicationDbContext
     public DbSet<Bookmark> Bookmarks => Set<Bookmark>();
     public DbSet<ExamAttempt> ExamAttempts => Set<ExamAttempt>();
     public DbSet<ExamAnswer> ExamAnswers => Set<ExamAnswer>();
+    public DbSet<AchievementCertificate> AchievementCertificates => Set<AchievementCertificate>();
     public DbSet<MaintenanceWindow> MaintenanceWindows => Set<MaintenanceWindow>();
     public DbSet<AuditLogEntry> AuditLogEntries => Set<AuditLogEntry>();
     public DbSet<PaymentTransaction> PaymentTransactions => Set<PaymentTransaction>();

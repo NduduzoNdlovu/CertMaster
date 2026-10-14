@@ -1,0 +1,1624 @@
+diff --git a/backend/src/CertMaster.Api/Controllers/AchievementCertificatesController.cs b/backend/src/CertMaster.Api/Controllers/AchievementCertificatesController.cs
+new file mode 100644
+index 0000000..c66716b
+--- /dev/null
++++ b/backend/src/CertMaster.Api/Controllers/AchievementCertificatesController.cs
+@@ -0,0 +1,41 @@
++using System.Security.Claims;
++using CertMaster.Application.Common.Interfaces;
++using Microsoft.AspNetCore.Authorization;
++using Microsoft.AspNetCore.Mvc;
++using Microsoft.EntityFrameworkCore;
++
++namespace CertMaster.Api.Controllers;
++
++[ApiController]
++[Route("api/achievement-certificates")]
++public sealed class AchievementCertificatesController : ControllerBase
++{
++    private readonly IApplicationDbContext _db;
++    public AchievementCertificatesController(IApplicationDbContext db) => _db = db;
++
++    [Authorize]
++    [HttpGet("mine")]
++    public async Task<IActionResult> Mine(CancellationToken ct)
++    {
++        var rawId = User.FindFirstValue(ClaimTypes.NameIdentifier) ?? User.FindFirstValue("sub");
++        if (!Guid.TryParse(rawId, out var userId)) return Unauthorized();
++        var certificates = await _db.AchievementCertificates.AsNoTracking()
++            .Where(c => c.UserId == userId)
++            .OrderByDescending(c => c.IssuedAtUtc)
++            .Select(c => new { c.Id, c.CertificationId, certificationName = c.Certification!.Name, c.ExamAttemptId, c.ScorePercent, c.Tier, c.VerificationCode, c.IssuedAtUtc })
++            .ToListAsync(ct);
++        return Ok(certificates);
++    }
++
++    [AllowAnonymous]
++    [HttpGet("verify/{code}")]
++    public async Task<IActionResult> Verify(string code, CancellationToken ct)
++    {
++        if (string.IsNullOrWhiteSpace(code)) return BadRequest();
++        var certificate = await _db.AchievementCertificates.AsNoTracking()
++            .Where(c => c.VerificationCode == code.ToUpperInvariant())
++            .Select(c => new { certificateType = "CertMaster Achievement Certificate", c.VerificationCode, learnerName = c.User!.FullName, certificationName = c.Certification!.Name, c.ScorePercent, c.Tier, c.IssuedAtUtc, issuer = "CertMaster" })
++            .FirstOrDefaultAsync(ct);
++        return certificate is null ? NotFound(new { message = "Certificate not found." }) : Ok(certificate);
++    }
++}
+diff --git a/backend/src/CertMaster.Application/Common/Interfaces/IApplicationDbContext.cs b/backend/src/CertMaster.Application/Common/Interfaces/IApplicationDbContext.cs
+index 63dd7c9..b09db32 100644
+--- a/backend/src/CertMaster.Application/Common/Interfaces/IApplicationDbContext.cs
++++ b/backend/src/CertMaster.Application/Common/Interfaces/IApplicationDbContext.cs
+@@ -20,6 +20,7 @@ public interface IApplicationDbContext
+     DbSet<Bookmark> Bookmarks { get; }
+     DbSet<ExamAttempt> ExamAttempts { get; }
+     DbSet<ExamAnswer> ExamAnswers { get; }
++    DbSet<AchievementCertificate> AchievementCertificates { get; }
+     DbSet<MaintenanceWindow> MaintenanceWindows { get; }
+     DbSet<AuditLogEntry> AuditLogEntries { get; }
+     DbSet<PaymentTransaction> PaymentTransactions { get; }
+diff --git a/backend/src/CertMaster.Application/Features/Exams/ExamService.cs b/backend/src/CertMaster.Application/Features/Exams/ExamService.cs
+index cb94e54..017f8a7 100644
+--- a/backend/src/CertMaster.Application/Features/Exams/ExamService.cs
++++ b/backend/src/CertMaster.Application/Features/Exams/ExamService.cs
+@@ -1,326 +1,352 @@
+-using CertMaster.Application.Common.Interfaces;
+-using CertMaster.Application.Features.Notifications;
+-using CertMaster.Domain.Entities;
+-using CertMaster.Domain.Enums;
+-using Microsoft.EntityFrameworkCore;
+-
+-namespace CertMaster.Application.Features.Exams;
+-
+-public record SubmitAnswerDto(Guid QuestionId, Guid? SelectedOptionId, bool WasFlaggedForReview);
+-
+-public record SubmitExamRequest(
+-    Guid CertificationId,
+-    string Mode, // "Practice" or "MockExam"
+-    int DurationSeconds,
+-    List<SubmitAnswerDto> Answers);
+-
+-public record ExamResultDto(Guid AttemptId, int TotalQuestions, int CorrectCount, int Score, bool Passed);
+-public record ExamAttemptSummaryDto(Guid Id, Guid CertificationId, string CertificationName, string Mode,
+-    DateTime StartedAt, DateTime? CompletedAt, int DurationSeconds, int TotalQuestions, int CorrectCount, int Score, bool Passed);
+-public record ExamAnswerResultDto(Guid QuestionId, string Prompt, Guid? SelectedOptionId, string? SelectedOption,
+-    Guid? CorrectOptionId, string? CorrectOption, bool IsCorrect, bool WasFlaggedForReview, string Explanation);
+-public record ExamAttemptDetailDto(ExamAttemptSummaryDto Attempt, IReadOnlyList<ExamAnswerResultDto> Answers);
+-public record StartExamRequest(Guid CertificationId, string Mode);
+-public record SaveExamAnswerRequest(Guid? SelectedOptionId, bool WasFlaggedForReview);
+-public record PracticeAnswerResultDto(Guid QuestionId, bool IsCorrect, Guid? CorrectOptionId, string? CorrectOption, string Explanation);
+-public record ExamQuestionOptionDto(Guid Id, string Text);
+-public record ExamSessionQuestionDto(Guid Id, string Topic, string Prompt, IReadOnlyList<ExamQuestionOptionDto> Options,
+-    Guid? SelectedOptionId, bool WasFlaggedForReview);
+-public record ExamSessionDto(Guid AttemptId, Guid CertificationId, string CertificationName, string Mode,
+-    DateTime StartedAtUtc, DateTime ExpiresAtUtc, DateTime ServerTimeUtc, int PassingScorePercent,
+-    IReadOnlyList<ExamSessionQuestionDto> Questions);
+-
+-public class ExamService
+-{
+-    private readonly IApplicationDbContext _db;
+-    private readonly ICurrentUserService _currentUser;
+-
+-    public ExamService(IApplicationDbContext db, ICurrentUserService currentUser)
+-    {
+-        _db = db;
+-        _currentUser = currentUser;
+-    }
+-
+-    public async Task<ExamResultDto> SubmitAsync(SubmitExamRequest request, CancellationToken ct)
+-    {
+-        if (_currentUser.UserId is null)
+-            throw new UnauthorizedAccessException();
+-
+-        var certification = await _db.Certifications.FirstOrDefaultAsync(c => c.Id == request.CertificationId, ct)
+-            ?? throw new KeyNotFoundException("Certification not found.");
+-        var questionIds = request.Answers.Select(a => a.QuestionId).Distinct().ToList();
+-        var questions = await _db.Questions
+-            .Include(q => q.Options)
+-            .Where(q => questionIds.Contains(q.Id))
+-            .ToListAsync(ct);
+-
+-        var attempt = new ExamAttempt
+-        {
+-            UserId = _currentUser.UserId.Value,
+-            CertificationId = request.CertificationId,
+-            Mode = Enum.Parse<ExamMode>(request.Mode),
+-            DurationSeconds = request.DurationSeconds,
+-            CompletedAtUtc = DateTime.UtcNow,
+-            TotalQuestions = request.Answers.Count,
+-        };
+-
+-        var correctCount = 0;
+-        foreach (var answer in request.Answers)
+-        {
+-            var question = questions.FirstOrDefault(q => q.Id == answer.QuestionId);
+-            var isCorrect = question?.Options.FirstOrDefault(o => o.Id == answer.SelectedOptionId)?.IsCorrect ?? false;
+-            if (isCorrect) correctCount++;
+-
+-            attempt.Answers.Add(new ExamAnswer
+-            {
+-                QuestionId = answer.QuestionId,
+-                SelectedOptionId = answer.SelectedOptionId,
+-                IsCorrect = isCorrect,
+-                WasFlaggedForReview = answer.WasFlaggedForReview,
+-            });
+-        }
+-
+-        attempt.CorrectCount = correctCount;
+-        attempt.Score = attempt.TotalQuestions == 0 ? 0 : (int)Math.Round(correctCount * 100.0 / attempt.TotalQuestions);
+-        attempt.Passed = attempt.Score >= certification.PassingScorePercent;
+-
+-        _db.ExamAttempts.Add(attempt);
+-
+-        await UpdateStudyStreakAsync(attempt.UserId, ct);
+-
+-        if (attempt.Mode == ExamMode.MockExam)
+-        {
+-            var resultWord = attempt.Passed ? "passed" : "did not pass";
+-            _db.Notifications.Add(NotificationService.Build(
+-                attempt.UserId,
+-                attempt.Passed ? "Mock exam passed!" : "Mock exam results are in",
+-                $"You scored {attempt.Score}% and {resultWord} this mock exam ({attempt.CorrectCount}/{attempt.TotalQuestions} correct).",
+-                "ExamResult"));
+-        }
+-
+-        await _db.SaveChangesAsync(ct);
+-
+-        return new ExamResultDto(attempt.Id, attempt.TotalQuestions, attempt.CorrectCount, attempt.Score, attempt.Passed);
+-    }
+-
+-    public async Task<ExamSessionDto> StartOrResumeAsync(StartExamRequest request, CancellationToken ct)
+-    {
+-        var userId = _currentUser.UserId ?? throw new UnauthorizedAccessException();
+-        if (!Enum.TryParse<ExamMode>(request.Mode, true, out var mode)) throw new ArgumentException("Invalid exam mode.");
+-        var existing = await LoadActiveAttemptAsync(userId, request.CertificationId, mode, ct);
+-        if (existing is not null)
+-        {
+-            if (HasExpired(existing)) await CompleteAttemptAsync(existing, ct);
+-            else return ToSession(existing);
+-        }
+-
+-        var certification = await _db.Certifications.AsNoTracking().FirstOrDefaultAsync(c => c.Id == request.CertificationId && c.IsActive, ct)
+-            ?? throw new KeyNotFoundException("Certification not found.");
+-        var take = mode == ExamMode.MockExam ? certification.MockExamQuestionCount : Math.Min(20, certification.MockExamQuestionCount);
+-        var questions = await _db.Questions.Include(q => q.Options)
+-            .Where(q => q.CertificationId == certification.Id && q.Status == QuestionStatus.Published)
+-            .OrderBy(_ => Guid.NewGuid()).Take(take).ToListAsync(ct);
+-        if (questions.Count == 0) throw new InvalidOperationException("No published questions are available.");
+-
+-        // var attempt = new ExamAttempt { UserId = userId, CertificationId = certification.Id, Certification = certification,
+-        //     Mode = mode, StartedAtUtc = DateTime.UtcNow, TotalQuestions = questions.Count };
+-
+-var attempt = new ExamAttempt
+-{
+-    UserId = userId,
+-    CertificationId = certification.Id,
+-    Mode = mode,
+-    StartedAtUtc = DateTime.UtcNow,
+-    TotalQuestions = questions.Count
+-};
+-
+-
+-        foreach (var question in questions) attempt.Answers.Add(new ExamAnswer { QuestionId = question.Id, Question = question });
+-        _db.ExamAttempts.Add(attempt);
+-        try { await _db.SaveChangesAsync(ct); }
+-        catch (DbUpdateException)
+-        {
+-            _db.ExamAttempts.Remove(attempt);
+-            var concurrent = await LoadActiveAttemptAsync(userId, request.CertificationId, mode, ct);
+-            if (concurrent is null) throw;
+-            return ToSession(concurrent);
+-        }
+-        return ToSession(attempt);
+-    }
+-
+-    public async Task<ExamSessionDto?> GetActiveAsync(Guid certificationId, string modeValue, CancellationToken ct)
+-    {
+-        var userId = _currentUser.UserId ?? throw new UnauthorizedAccessException();
+-        if (!Enum.TryParse<ExamMode>(modeValue, true, out var mode)) return null;
+-        var attempt = await LoadActiveAttemptAsync(userId, certificationId, mode, ct);
+-        if (attempt is null) return null;
+-        if (HasExpired(attempt)) { await CompleteAttemptAsync(attempt, ct); return null; }
+-        return ToSession(attempt);
+-    }
+-
+-    public async Task SaveAnswerAsync(Guid attemptId, Guid questionId, SaveExamAnswerRequest request, CancellationToken ct)
+-    {
+-        var userId = _currentUser.UserId ?? throw new UnauthorizedAccessException();
+-        var attempt = await LoadAttemptAsync(attemptId, userId, ct) ?? throw new KeyNotFoundException("Active exam not found.");
+-        if (attempt.CompletedAtUtc is not null) throw new InvalidOperationException("This exam is already complete.");
+-        if (HasExpired(attempt)) { await CompleteAttemptAsync(attempt, ct); throw new InvalidOperationException("Exam time has expired."); }
+-        var answer = attempt.Answers.FirstOrDefault(a => a.QuestionId == questionId) ?? throw new KeyNotFoundException("Question is not part of this exam.");
+-        if (request.SelectedOptionId is not null && answer.Question?.Options.All(o => o.Id != request.SelectedOptionId) != false)
+-            throw new ArgumentException("Selected option is invalid.");
+-        answer.SelectedOptionId = request.SelectedOptionId;
+-        answer.WasFlaggedForReview = request.WasFlaggedForReview;
+-        await _db.SaveChangesAsync(ct);
+-    }
+-
+-    public async Task<PracticeAnswerResultDto> SubmitPracticeAnswerAsync(
+-        Guid attemptId,
+-        Guid questionId,
+-        SaveExamAnswerRequest request,
+-        CancellationToken ct)
+-    {
+-        var userId = _currentUser.UserId ?? throw new UnauthorizedAccessException();
+-        var attempt = await LoadAttemptAsync(attemptId, userId, ct)
+-            ?? throw new KeyNotFoundException("Practice session not found.");
+-
+-        if (attempt.Mode != ExamMode.Practice)
+-            throw new InvalidOperationException("This attempt is not a practice session.");
+-
+-        if (attempt.CompletedAtUtc is not null)
+-            throw new InvalidOperationException("This practice session is already complete.");
+-
+-        if (HasExpired(attempt))
+-        {
+-            await CompleteAttemptAsync(attempt, ct);
+-            throw new InvalidOperationException("Practice session has expired.");
+-        }
+-
+-        var answer = attempt.Answers.FirstOrDefault(a => a.QuestionId == questionId)
+-            ?? throw new KeyNotFoundException("Question is not part of this practice session.");
+-
+-        if (request.SelectedOptionId is not null &&
+-            answer.Question?.Options.All(o => o.Id != request.SelectedOptionId) != false)
+-            throw new ArgumentException("Selected option is invalid.");
+-
+-        answer.SelectedOptionId = request.SelectedOptionId;
+-        answer.WasFlaggedForReview = request.WasFlaggedForReview;
+-        answer.IsCorrect = answer.Question?.Options.Any(o => o.Id == request.SelectedOptionId && o.IsCorrect) == true;
+-
+-        var correct = answer.Question?.Options.FirstOrDefault(o => o.IsCorrect);
+-
+-        await _db.SaveChangesAsync(ct);
+-
+-        return new PracticeAnswerResultDto(
+-            questionId,
+-            answer.IsCorrect,
+-            correct?.Id,
+-            correct?.Text,
+-            answer.Question?.Explanation ?? string.Empty);
+-    }
+-
+-    public async Task<ExamResultDto> CompleteAsync(Guid attemptId, CancellationToken ct)
+-    {
+-        var userId = _currentUser.UserId ?? throw new UnauthorizedAccessException();
+-        var attempt = await LoadAttemptAsync(attemptId, userId, ct) ?? throw new KeyNotFoundException("Exam not found.");
+-        if (attempt.CompletedAtUtc is null) await CompleteAttemptAsync(attempt, ct);
+-        return new ExamResultDto(attempt.Id, attempt.TotalQuestions, attempt.CorrectCount, attempt.Score, attempt.Passed);
+-    }
+-
+-    private async Task<ExamAttempt?> LoadActiveAttemptAsync(Guid userId, Guid certificationId, ExamMode mode, CancellationToken ct) =>
+-        await _db.ExamAttempts.Include(a => a.Certification).Include(a => a.Answers).ThenInclude(a => a.Question).ThenInclude(q => q!.Options)
+-            .FirstOrDefaultAsync(a => a.UserId == userId && a.Mode == mode && a.CompletedAtUtc == null &&
+-                (mode == ExamMode.MockExam || a.CertificationId == certificationId), ct);
+-
+-    private async Task<ExamAttempt?> LoadAttemptAsync(Guid attemptId, Guid userId, CancellationToken ct) =>
+-        await _db.ExamAttempts.Include(a => a.Certification).Include(a => a.Answers).ThenInclude(a => a.Question).ThenInclude(q => q!.Options)
+-            .FirstOrDefaultAsync(a => a.Id == attemptId && a.UserId == userId, ct);
+-
+-    private static bool HasExpired(ExamAttempt attempt) => DateTime.UtcNow >= attempt.StartedAtUtc.AddMinutes(attempt.Certification?.ExamDurationMinutes ?? 90);
+-
+-    private async Task CompleteAttemptAsync(ExamAttempt attempt, CancellationToken ct)
+-    {
+-        foreach (var answer in attempt.Answers)
+-            answer.IsCorrect = answer.Question?.Options.Any(o => o.Id == answer.SelectedOptionId && o.IsCorrect) == true;
+-        attempt.CorrectCount = attempt.Answers.Count(a => a.IsCorrect);
+-        attempt.TotalQuestions = attempt.Answers.Count;
+-        attempt.Score = attempt.TotalQuestions == 0 ? 0 : (int)Math.Round(attempt.CorrectCount * 100.0 / attempt.TotalQuestions);
+-        attempt.Passed = attempt.Score >= (attempt.Certification?.PassingScorePercent ?? 65);
+-        attempt.CompletedAtUtc = DateTime.UtcNow;
+-        attempt.DurationSeconds = Math.Max(0, (int)(attempt.CompletedAtUtc.Value - attempt.StartedAtUtc).TotalSeconds);
+-        await UpdateStudyStreakAsync(attempt.UserId, ct);
+-        await _db.SaveChangesAsync(ct);
+-    }
+-
+-    private static ExamSessionDto ToSession(ExamAttempt attempt)
+-    {
+-        var certification = attempt.Certification ?? throw new InvalidOperationException("Certification was not loaded.");
+-        return new ExamSessionDto(attempt.Id, attempt.CertificationId, certification.Name, attempt.Mode.ToString(), attempt.StartedAtUtc,
+-            attempt.StartedAtUtc.AddMinutes(certification.ExamDurationMinutes), DateTime.UtcNow, certification.PassingScorePercent,
+-            attempt.Answers.OrderBy(a => a.CreatedAtUtc).Select(a => new ExamSessionQuestionDto(a.QuestionId,
+-                a.Question?.Topic ?? "", a.Question?.Prompt ?? "Question unavailable",
+-                a.Question?.Options.OrderBy(o => o.SortOrder).Select(o => new ExamQuestionOptionDto(o.Id, o.Text)).ToList() ?? [],
+-                a.SelectedOptionId, a.WasFlaggedForReview)).ToList());
+-    }
+-
+-    public async Task<List<ExamAttemptSummaryDto>> GetMyResultsAsync(CancellationToken ct)
+-    {
+-        var userId = _currentUser.UserId ?? throw new UnauthorizedAccessException();
+-        return await _db.ExamAttempts.AsNoTracking()
+-            .Where(a => a.UserId == userId && a.CompletedAtUtc != null)
+-            .OrderByDescending(a => a.CompletedAtUtc)
+-            .Select(a => new ExamAttemptSummaryDto(a.Id, a.CertificationId,
+-                a.Certification != null ? a.Certification.Name : "Unknown", a.Mode.ToString(), a.StartedAtUtc,
+-                a.CompletedAtUtc, a.DurationSeconds, a.TotalQuestions, a.CorrectCount, a.Score, a.Passed))
+-            .ToListAsync(ct);
+-    }
+-
+-    public async Task<ExamAttemptDetailDto?> GetMyResultAsync(Guid attemptId, CancellationToken ct)
+-    {
+-        var userId = _currentUser.UserId ?? throw new UnauthorizedAccessException();
+-
+-        var attempt = await _db.ExamAttempts.AsNoTracking()
+-            .Include(a => a.Certification).Include(a => a.Answers).ThenInclude(a => a.Question).ThenInclude(q => q!.Options)
+-            .FirstOrDefaultAsync(a => a.Id == attemptId && a.UserId == userId && a.CompletedAtUtc != null, ct);
+-        if (attempt is null) return null;
+-        var summary = new ExamAttemptSummaryDto(attempt.Id, attempt.CertificationId, attempt.Certification?.Name ?? "Unknown",
+-            attempt.Mode.ToString(), attempt.StartedAtUtc, attempt.CompletedAtUtc, attempt.DurationSeconds,
+-            attempt.TotalQuestions, attempt.CorrectCount, attempt.Score, attempt.Passed);
+-        var answers = attempt.Answers.OrderBy(a => a.CreatedAtUtc).Select(a =>
+-        {
+-            var selected = a.Question?.Options.FirstOrDefault(o => o.Id == a.SelectedOptionId);
+-            var correct = a.Question?.Options.FirstOrDefault(o => o.IsCorrect);
+-            return new ExamAnswerResultDto(a.QuestionId, a.Question?.Prompt ?? "Question unavailable", a.SelectedOptionId,
+-                selected?.Text, correct?.Id, correct?.Text, a.IsCorrect, a.WasFlaggedForReview, a.Question?.Explanation ?? "");
+-        }).ToList();
+-        return new ExamAttemptDetailDto(summary, answers);
+-    }
+-
+-    /// <summary>
+-    /// Increments the streak if the user's last recorded activity was yesterday (UTC date),
+-    /// leaves it unchanged if they've already been active today, and resets to 1 if there's
+-    /// a gap of more than one day. This is the single place streak logic lives, so any future
+-    /// activity type (not just exam submissions) can call it the same way.
+-    /// </summary>
+-    private async Task UpdateStudyStreakAsync(Guid userId, CancellationToken ct)
+-    {
+-        var user = await _db.Users.FirstOrDefaultAsync(u => u.Id == userId, ct);
+-        if (user is null) return;
+-
+-        var today = DateTime.UtcNow.Date;
+-        var lastActivityDate = user.LastActivityAtUtc?.Date;
+-
+-        if (lastActivityDate == today)
+-        {
+-            // Already active today — streak unchanged.
+-        }
+-        else if (lastActivityDate == today.AddDays(-1))
+-        {
+-            user.StudyStreakDays += 1;
+-        }
+-        else
+-        {
+-            user.StudyStreakDays = 1;
+-        }
+-
+-        user.LastActivityAtUtc = DateTime.UtcNow;
+-    }
+-}
++using CertMaster.Application.Common.Interfaces;
++using CertMaster.Application.Features.Notifications;
++using CertMaster.Domain.Entities;
++using CertMaster.Domain.Enums;
++using Microsoft.EntityFrameworkCore;
++
++namespace CertMaster.Application.Features.Exams;
++
++public record SubmitAnswerDto(Guid QuestionId, Guid? SelectedOptionId, bool WasFlaggedForReview);
++
++public record SubmitExamRequest(
++    Guid CertificationId,
++    string Mode, // "Practice" or "MockExam"
++    int DurationSeconds,
++    List<SubmitAnswerDto> Answers);
++
++public record ExamResultDto(Guid AttemptId, int TotalQuestions, int CorrectCount, int Score, bool Passed);
++public record ExamAttemptSummaryDto(Guid Id, Guid CertificationId, string CertificationName, string Mode,
++    DateTime StartedAt, DateTime? CompletedAt, int DurationSeconds, int TotalQuestions, int CorrectCount, int Score, bool Passed);
++public record ExamAnswerResultDto(Guid QuestionId, string Prompt, Guid? SelectedOptionId, string? SelectedOption,
++    Guid? CorrectOptionId, string? CorrectOption, bool IsCorrect, bool WasFlaggedForReview, string Explanation);
++public record ExamAttemptDetailDto(ExamAttemptSummaryDto Attempt, IReadOnlyList<ExamAnswerResultDto> Answers);
++public record StartExamRequest(Guid CertificationId, string Mode);
++public record SaveExamAnswerRequest(Guid? SelectedOptionId, bool WasFlaggedForReview);
++public record PracticeAnswerResultDto(Guid QuestionId, bool IsCorrect, Guid? CorrectOptionId, string? CorrectOption, string Explanation);
++public record ExamQuestionOptionDto(Guid Id, string Text);
++public record ExamSessionQuestionDto(Guid Id, string Topic, string Prompt, IReadOnlyList<ExamQuestionOptionDto> Options,
++    Guid? SelectedOptionId, bool WasFlaggedForReview);
++public record ExamSessionDto(Guid AttemptId, Guid CertificationId, string CertificationName, string Mode,
++    DateTime StartedAtUtc, DateTime ExpiresAtUtc, DateTime ServerTimeUtc, int PassingScorePercent,
++    IReadOnlyList<ExamSessionQuestionDto> Questions);
++
++public class ExamService
++{
++    private readonly IApplicationDbContext _db;
++    private readonly ICurrentUserService _currentUser;
++
++    public ExamService(IApplicationDbContext db, ICurrentUserService currentUser)
++    {
++        _db = db;
++        _currentUser = currentUser;
++    }
++
++    public async Task<ExamResultDto> SubmitAsync(SubmitExamRequest request, CancellationToken ct)
++    {
++        if (_currentUser.UserId is null)
++            throw new UnauthorizedAccessException();
++
++        var certification = await _db.Certifications.FirstOrDefaultAsync(c => c.Id == request.CertificationId, ct)
++            ?? throw new KeyNotFoundException("Certification not found.");
++        var questionIds = request.Answers.Select(a => a.QuestionId).Distinct().ToList();
++        var questions = await _db.Questions
++            .Include(q => q.Options)
++            .Where(q => questionIds.Contains(q.Id))
++            .ToListAsync(ct);
++
++        var attempt = new ExamAttempt
++        {
++            UserId = _currentUser.UserId.Value,
++            CertificationId = request.CertificationId,
++            Mode = Enum.Parse<ExamMode>(request.Mode),
++            DurationSeconds = request.DurationSeconds,
++            CompletedAtUtc = DateTime.UtcNow,
++            TotalQuestions = request.Answers.Count,
++        };
++
++        var correctCount = 0;
++        foreach (var answer in request.Answers)
++        {
++            var question = questions.FirstOrDefault(q => q.Id == answer.QuestionId);
++            var isCorrect = question?.Options.FirstOrDefault(o => o.Id == answer.SelectedOptionId)?.IsCorrect ?? false;
++            if (isCorrect) correctCount++;
++
++            attempt.Answers.Add(new ExamAnswer
++            {
++                QuestionId = answer.QuestionId,
++                SelectedOptionId = answer.SelectedOptionId,
++                IsCorrect = isCorrect,
++                WasFlaggedForReview = answer.WasFlaggedForReview,
++            });
++        }
++
++        attempt.CorrectCount = correctCount;
++        attempt.Score = attempt.TotalQuestions == 0 ? 0 : (int)Math.Round(correctCount * 100.0 / attempt.TotalQuestions);
++        attempt.Passed = attempt.Score >= certification.PassingScorePercent;
++
++        _db.ExamAttempts.Add(attempt);
++
++        await UpdateStudyStreakAsync(attempt.UserId, ct);
++
++        if (attempt.Mode == ExamMode.MockExam)
++        {
++            var resultWord = attempt.Passed ? "passed" : "did not pass";
++            _db.Notifications.Add(NotificationService.Build(
++                attempt.UserId,
++                attempt.Passed ? "Mock exam passed!" : "Mock exam results are in",
++                $"You scored {attempt.Score}% and {resultWord} this mock exam ({attempt.CorrectCount}/{attempt.TotalQuestions} correct).",
++                "ExamResult"));
++        }
++
++        await _db.SaveChangesAsync(ct);
++        if (attempt.Mode == ExamMode.MockExam)
++        {
++            await AddAchievementCertificateIfEligibleAsync(attempt, ct);
++            await _db.SaveChangesAsync(ct);
++        }
++
++        return new ExamResultDto(attempt.Id, attempt.TotalQuestions, attempt.CorrectCount, attempt.Score, attempt.Passed);
++    }
++
++    public async Task<ExamSessionDto> StartOrResumeAsync(StartExamRequest request, CancellationToken ct)
++    {
++        var userId = _currentUser.UserId ?? throw new UnauthorizedAccessException();
++        if (!Enum.TryParse<ExamMode>(request.Mode, true, out var mode)) throw new ArgumentException("Invalid exam mode.");
++        var existing = await LoadActiveAttemptAsync(userId, request.CertificationId, mode, ct);
++        if (existing is not null)
++        {
++            if (HasExpired(existing)) await CompleteAttemptAsync(existing, ct);
++            else return ToSession(existing);
++        }
++
++        var certification = await _db.Certifications.AsNoTracking().FirstOrDefaultAsync(c => c.Id == request.CertificationId && c.IsActive, ct)
++            ?? throw new KeyNotFoundException("Certification not found.");
++        var take = mode == ExamMode.MockExam ? certification.MockExamQuestionCount : Math.Min(20, certification.MockExamQuestionCount);
++        var questions = await _db.Questions.Include(q => q.Options)
++            .Where(q => q.CertificationId == certification.Id && q.Status == QuestionStatus.Published)
++            .OrderBy(_ => Guid.NewGuid()).Take(take).ToListAsync(ct);
++        if (questions.Count == 0) throw new InvalidOperationException("No published questions are available.");
++
++        // var attempt = new ExamAttempt { UserId = userId, CertificationId = certification.Id, Certification = certification,
++        //     Mode = mode, StartedAtUtc = DateTime.UtcNow, TotalQuestions = questions.Count };
++
++var attempt = new ExamAttempt
++{
++    UserId = userId,
++    CertificationId = certification.Id,
++    Mode = mode,
++    StartedAtUtc = DateTime.UtcNow,
++    TotalQuestions = questions.Count
++};
++
++
++        foreach (var question in questions) attempt.Answers.Add(new ExamAnswer { QuestionId = question.Id, Question = question });
++        _db.ExamAttempts.Add(attempt);
++        try { await _db.SaveChangesAsync(ct); }
++        catch (DbUpdateException)
++        {
++            _db.ExamAttempts.Remove(attempt);
++            var concurrent = await LoadActiveAttemptAsync(userId, request.CertificationId, mode, ct);
++            if (concurrent is null) throw;
++            return ToSession(concurrent);
++        }
++        return ToSession(attempt);
++    }
++
++    public async Task<ExamSessionDto?> GetActiveAsync(Guid certificationId, string modeValue, CancellationToken ct)
++    {
++        var userId = _currentUser.UserId ?? throw new UnauthorizedAccessException();
++        if (!Enum.TryParse<ExamMode>(modeValue, true, out var mode)) return null;
++        var attempt = await LoadActiveAttemptAsync(userId, certificationId, mode, ct);
++        if (attempt is null) return null;
++        if (HasExpired(attempt)) { await CompleteAttemptAsync(attempt, ct); return null; }
++        return ToSession(attempt);
++    }
++
++    public async Task SaveAnswerAsync(Guid attemptId, Guid questionId, SaveExamAnswerRequest request, CancellationToken ct)
++    {
++        var userId = _currentUser.UserId ?? throw new UnauthorizedAccessException();
++        var attempt = await LoadAttemptAsync(attemptId, userId, ct) ?? throw new KeyNotFoundException("Active exam not found.");
++        if (attempt.CompletedAtUtc is not null) throw new InvalidOperationException("This exam is already complete.");
++        if (HasExpired(attempt)) { await CompleteAttemptAsync(attempt, ct); throw new InvalidOperationException("Exam time has expired."); }
++        var answer = attempt.Answers.FirstOrDefault(a => a.QuestionId == questionId) ?? throw new KeyNotFoundException("Question is not part of this exam.");
++        if (request.SelectedOptionId is not null && answer.Question?.Options.All(o => o.Id != request.SelectedOptionId) != false)
++            throw new ArgumentException("Selected option is invalid.");
++        answer.SelectedOptionId = request.SelectedOptionId;
++        answer.WasFlaggedForReview = request.WasFlaggedForReview;
++        await _db.SaveChangesAsync(ct);
++    }
++
++    public async Task<PracticeAnswerResultDto> SubmitPracticeAnswerAsync(
++        Guid attemptId,
++        Guid questionId,
++        SaveExamAnswerRequest request,
++        CancellationToken ct)
++    {
++        var userId = _currentUser.UserId ?? throw new UnauthorizedAccessException();
++        var attempt = await LoadAttemptAsync(attemptId, userId, ct)
++            ?? throw new KeyNotFoundException("Practice session not found.");
++
++        if (attempt.Mode != ExamMode.Practice)
++            throw new InvalidOperationException("This attempt is not a practice session.");
++
++        if (attempt.CompletedAtUtc is not null)
++            throw new InvalidOperationException("This practice session is already complete.");
++
++        if (HasExpired(attempt))
++        {
++            await CompleteAttemptAsync(attempt, ct);
++            throw new InvalidOperationException("Practice session has expired.");
++        }
++
++        var answer = attempt.Answers.FirstOrDefault(a => a.QuestionId == questionId)
++            ?? throw new KeyNotFoundException("Question is not part of this practice session.");
++
++        if (request.SelectedOptionId is not null &&
++            answer.Question?.Options.All(o => o.Id != request.SelectedOptionId) != false)
++            throw new ArgumentException("Selected option is invalid.");
++
++        answer.SelectedOptionId = request.SelectedOptionId;
++        answer.WasFlaggedForReview = request.WasFlaggedForReview;
++        answer.IsCorrect = answer.Question?.Options.Any(o => o.Id == request.SelectedOptionId && o.IsCorrect) == true;
++
++        var correct = answer.Question?.Options.FirstOrDefault(o => o.IsCorrect);
++
++        await _db.SaveChangesAsync(ct);
++
++        return new PracticeAnswerResultDto(
++            questionId,
++            answer.IsCorrect,
++            correct?.Id,
++            correct?.Text,
++            answer.Question?.Explanation ?? string.Empty);
++    }
++
++    public async Task<ExamResultDto> CompleteAsync(Guid attemptId, CancellationToken ct)
++    {
++        var userId = _currentUser.UserId ?? throw new UnauthorizedAccessException();
++        var attempt = await LoadAttemptAsync(attemptId, userId, ct) ?? throw new KeyNotFoundException("Exam not found.");
++        if (attempt.CompletedAtUtc is null) await CompleteAttemptAsync(attempt, ct);
++        return new ExamResultDto(attempt.Id, attempt.TotalQuestions, attempt.CorrectCount, attempt.Score, attempt.Passed);
++    }
++
++    private async Task<ExamAttempt?> LoadActiveAttemptAsync(Guid userId, Guid certificationId, ExamMode mode, CancellationToken ct) =>
++        await _db.ExamAttempts.Include(a => a.Certification).Include(a => a.Answers).ThenInclude(a => a.Question).ThenInclude(q => q!.Options)
++            .FirstOrDefaultAsync(a => a.UserId == userId && a.Mode == mode && a.CompletedAtUtc == null &&
++                (mode == ExamMode.MockExam || a.CertificationId == certificationId), ct);
++
++    private async Task<ExamAttempt?> LoadAttemptAsync(Guid attemptId, Guid userId, CancellationToken ct) =>
++        await _db.ExamAttempts.Include(a => a.Certification).Include(a => a.Answers).ThenInclude(a => a.Question).ThenInclude(q => q!.Options)
++            .FirstOrDefaultAsync(a => a.Id == attemptId && a.UserId == userId, ct);
++
++    private static bool HasExpired(ExamAttempt attempt) => DateTime.UtcNow >= attempt.StartedAtUtc.AddMinutes(attempt.Certification?.ExamDurationMinutes ?? 90);
++
++    private async Task CompleteAttemptAsync(ExamAttempt attempt, CancellationToken ct)
++    {
++        foreach (var answer in attempt.Answers)
++            answer.IsCorrect = answer.Question?.Options.Any(o => o.Id == answer.SelectedOptionId && o.IsCorrect) == true;
++        attempt.CorrectCount = attempt.Answers.Count(a => a.IsCorrect);
++        attempt.TotalQuestions = attempt.Answers.Count;
++        attempt.Score = attempt.TotalQuestions == 0 ? 0 : (int)Math.Round(attempt.CorrectCount * 100.0 / attempt.TotalQuestions);
++        attempt.Passed = attempt.Score >= (attempt.Certification?.PassingScorePercent ?? 65);
++        attempt.CompletedAtUtc = DateTime.UtcNow;
++        attempt.DurationSeconds = Math.Max(0, (int)(attempt.CompletedAtUtc.Value - attempt.StartedAtUtc).TotalSeconds);
++        await UpdateStudyStreakAsync(attempt.UserId, ct);
++        await _db.SaveChangesAsync(ct);
++        if (attempt.Mode == ExamMode.MockExam)
++        {
++            await AddAchievementCertificateIfEligibleAsync(attempt, ct);
++            await _db.SaveChangesAsync(ct);
++        }
++    }
++
++    private static ExamSessionDto ToSession(ExamAttempt attempt)
++    {
++        var certification = attempt.Certification ?? throw new InvalidOperationException("Certification was not loaded.");
++        return new ExamSessionDto(attempt.Id, attempt.CertificationId, certification.Name, attempt.Mode.ToString(), attempt.StartedAtUtc,
++            attempt.StartedAtUtc.AddMinutes(certification.ExamDurationMinutes), DateTime.UtcNow, certification.PassingScorePercent,
++            attempt.Answers.OrderBy(a => a.CreatedAtUtc).Select(a => new ExamSessionQuestionDto(a.QuestionId,
++                a.Question?.Topic ?? "", a.Question?.Prompt ?? "Question unavailable",
++                a.Question?.Options.OrderBy(o => o.SortOrder).Select(o => new ExamQuestionOptionDto(o.Id, o.Text)).ToList() ?? [],
++                a.SelectedOptionId, a.WasFlaggedForReview)).ToList());
++    }
++
++    public async Task<List<ExamAttemptSummaryDto>> GetMyResultsAsync(CancellationToken ct)
++    {
++        var userId = _currentUser.UserId ?? throw new UnauthorizedAccessException();
++        return await _db.ExamAttempts.AsNoTracking()
++            .Where(a => a.UserId == userId && a.CompletedAtUtc != null)
++            .OrderByDescending(a => a.CompletedAtUtc)
++            .Select(a => new ExamAttemptSummaryDto(a.Id, a.CertificationId,
++                a.Certification != null ? a.Certification.Name : "Unknown", a.Mode.ToString(), a.StartedAtUtc,
++                a.CompletedAtUtc, a.DurationSeconds, a.TotalQuestions, a.CorrectCount, a.Score, a.Passed))
++            .ToListAsync(ct);
++    }
++
++    public async Task<ExamAttemptDetailDto?> GetMyResultAsync(Guid attemptId, CancellationToken ct)
++    {
++        var userId = _currentUser.UserId ?? throw new UnauthorizedAccessException();
++
++        var attempt = await _db.ExamAttempts.AsNoTracking()
++            .Include(a => a.Certification).Include(a => a.Answers).ThenInclude(a => a.Question).ThenInclude(q => q!.Options)
++            .FirstOrDefaultAsync(a => a.Id == attemptId && a.UserId == userId && a.CompletedAtUtc != null, ct);
++        if (attempt is null) return null;
++        var summary = new ExamAttemptSummaryDto(attempt.Id, attempt.CertificationId, attempt.Certification?.Name ?? "Unknown",
++            attempt.Mode.ToString(), attempt.StartedAtUtc, attempt.CompletedAtUtc, attempt.DurationSeconds,
++            attempt.TotalQuestions, attempt.CorrectCount, attempt.Score, attempt.Passed);
++        var answers = attempt.Answers.OrderBy(a => a.CreatedAtUtc).Select(a =>
++        {
++            var selected = a.Question?.Options.FirstOrDefault(o => o.Id == a.SelectedOptionId);
++            var correct = a.Question?.Options.FirstOrDefault(o => o.IsCorrect);
++            return new ExamAnswerResultDto(a.QuestionId, a.Question?.Prompt ?? "Question unavailable", a.SelectedOptionId,
++                selected?.Text, correct?.Id, correct?.Text, a.IsCorrect, a.WasFlaggedForReview, a.Question?.Explanation ?? "");
++        }).ToList();
++        return new ExamAttemptDetailDto(summary, answers);
++    }
++
++    /// <summary>
++    /// Increments the streak if the user's last recorded activity was yesterday (UTC date),
++    /// leaves it unchanged if they've already been active today, and resets to 1 if there's
++    /// a gap of more than one day. This is the single place streak logic lives, so any future
++    /// activity type (not just exam submissions) can call it the same way.
++    /// </summary>
++    private async Task AddAchievementCertificateIfEligibleAsync(ExamAttempt attempt, CancellationToken ct)
++    {
++        if (attempt.Score < 75 || await _db.AchievementCertificates.AnyAsync(c => c.ExamAttemptId == attempt.Id, ct)) return;
++        var tier = attempt.Score <= 85 ? "Good" : attempt.Score <= 95 ? "Very Good" : "Excellent";
++        _db.AchievementCertificates.Add(new AchievementCertificate
++        {
++            UserId = attempt.UserId,
++            CertificationId = attempt.CertificationId,
++            ExamAttemptId = attempt.Id,
++            ScorePercent = attempt.Score,
++            Tier = tier,
++            VerificationCode = Guid.NewGuid().ToString("N").ToUpperInvariant(),
++            IssuedAtUtc = DateTime.UtcNow
++        });
++    }
++
++    private async Task UpdateStudyStreakAsync(Guid userId, CancellationToken ct)
++    {
++        var user = await _db.Users.FirstOrDefaultAsync(u => u.Id == userId, ct);
++        if (user is null) return;
++
++        var today = DateTime.UtcNow.Date;
++        var lastActivityDate = user.LastActivityAtUtc?.Date;
++
++        if (lastActivityDate == today)
++        {
++            // Already active today — streak unchanged.
++        }
++        else if (lastActivityDate == today.AddDays(-1))
++        {
++            user.StudyStreakDays += 1;
++        }
++        else
++        {
++            user.StudyStreakDays = 1;
++        }
++
++        user.LastActivityAtUtc = DateTime.UtcNow;
++    }
++}
+diff --git a/backend/src/CertMaster.Domain/Entities/AchievementCertificate.cs b/backend/src/CertMaster.Domain/Entities/AchievementCertificate.cs
+new file mode 100644
+index 0000000..d450d97
+--- /dev/null
++++ b/backend/src/CertMaster.Domain/Entities/AchievementCertificate.cs
+@@ -0,0 +1,18 @@
++using CertMaster.Domain.Common;
++
++namespace CertMaster.Domain.Entities;
++
++/// <summary>CertMaster-issued recognition for a completed mock exam. This is not a vendor certification.</summary>
++public sealed class AchievementCertificate : BaseEntity
++{
++    public Guid UserId { get; set; }
++    public User? User { get; set; }
++    public Guid CertificationId { get; set; }
++    public Certification? Certification { get; set; }
++    public Guid ExamAttemptId { get; set; }
++    public ExamAttempt? ExamAttempt { get; set; }
++    public int ScorePercent { get; set; }
++    public string Tier { get; set; } = string.Empty;
++    public string VerificationCode { get; set; } = Guid.NewGuid().ToString("N").ToUpperInvariant();
++    public DateTime IssuedAtUtc { get; set; } = DateTime.UtcNow;
++}
+diff --git a/backend/src/CertMaster.Infrastructure/Migrations/20261013000100_AddAchievementCertificates.cs b/backend/src/CertMaster.Infrastructure/Migrations/20261013000100_AddAchievementCertificates.cs
+new file mode 100644
+index 0000000..11fef15
+--- /dev/null
++++ b/backend/src/CertMaster.Infrastructure/Migrations/20261013000100_AddAchievementCertificates.cs
+@@ -0,0 +1,40 @@
++using Microsoft.EntityFrameworkCore.Migrations;
++
++#nullable disable
++
++namespace CertMaster.Infrastructure.Migrations;
++
++[Microsoft.EntityFrameworkCore.Infrastructure.DbContext(typeof(CertMaster.Infrastructure.Persistence.AppDbContext))]
++[Migration("20261013000100_AddAchievementCertificates")]
++public partial class AddAchievementCertificates : Migration
++{
++    protected override void Up(MigrationBuilder migrationBuilder)
++    {
++        migrationBuilder.CreateTable(
++            name: "AchievementCertificates",
++            columns: table => new
++            {
++                Id = table.Column<Guid>(type: "uuid", nullable: false),
++                UserId = table.Column<Guid>(type: "uuid", nullable: false),
++                CertificationId = table.Column<Guid>(type: "uuid", nullable: false),
++                ExamAttemptId = table.Column<Guid>(type: "uuid", nullable: false),
++                ScorePercent = table.Column<int>(type: "integer", nullable: false),
++                Tier = table.Column<string>(type: "character varying(32)", maxLength: 32, nullable: false),
++                VerificationCode = table.Column<string>(type: "character varying(64)", maxLength: 64, nullable: false),
++                IssuedAtUtc = table.Column<DateTime>(type: "timestamp with time zone", nullable: false),
++                CreatedAtUtc = table.Column<DateTime>(type: "timestamp with time zone", nullable: false),
++                ModifiedAtUtc = table.Column<DateTime>(type: "timestamp with time zone", nullable: true)
++            },
++            constraints: table =>
++            {
++                table.PrimaryKey("PK_AchievementCertificates", x => x.Id);
++                table.ForeignKey("FK_AchievementCertificates_Users_UserId", x => x.UserId, "Users", "Id", onDelete: ReferentialAction.Cascade);
++                table.ForeignKey("FK_AchievementCertificates_Certifications_CertificationId", x => x.CertificationId, "Certifications", "Id", onDelete: ReferentialAction.Restrict);
++                table.ForeignKey("FK_AchievementCertificates_ExamAttempts_ExamAttemptId", x => x.ExamAttemptId, "ExamAttempts", "Id", onDelete: ReferentialAction.Cascade);
++            });
++        migrationBuilder.CreateIndex("IX_AchievementCertificates_UserId_IssuedAtUtc", "AchievementCertificates", new[] { "UserId", "IssuedAtUtc" });
++        migrationBuilder.CreateIndex("IX_AchievementCertificates_ExamAttemptId", "AchievementCertificates", "ExamAttemptId", unique: true);
++        migrationBuilder.CreateIndex("IX_AchievementCertificates_VerificationCode", "AchievementCertificates", "VerificationCode", unique: true);
++    }
++    protected override void Down(MigrationBuilder migrationBuilder) => migrationBuilder.DropTable("AchievementCertificates");
++}
+diff --git a/backend/src/CertMaster.Infrastructure/Persistence/AppDbContext.cs b/backend/src/CertMaster.Infrastructure/Persistence/AppDbContext.cs
+index 23a1fed..47f39f1 100644
+--- a/backend/src/CertMaster.Infrastructure/Persistence/AppDbContext.cs
++++ b/backend/src/CertMaster.Infrastructure/Persistence/AppDbContext.cs
+@@ -19,6 +19,7 @@ public class AppDbContext : DbContext, IApplicationDbContext
+     public DbSet<Bookmark> Bookmarks => Set<Bookmark>();
+     public DbSet<ExamAttempt> ExamAttempts => Set<ExamAttempt>();
+     public DbSet<ExamAnswer> ExamAnswers => Set<ExamAnswer>();
++    public DbSet<AchievementCertificate> AchievementCertificates => Set<AchievementCertificate>();
+     public DbSet<MaintenanceWindow> MaintenanceWindows => Set<MaintenanceWindow>();
+     public DbSet<AuditLogEntry> AuditLogEntries => Set<AuditLogEntry>();
+     public DbSet<PaymentTransaction> PaymentTransactions => Set<PaymentTransaction>();
+diff --git a/backend/src/CertMaster.Infrastructure/Persistence/Configurations/EntityConfigurations.cs b/backend/src/CertMaster.Infrastructure/Persistence/Configurations/EntityConfigurations.cs
+index 471e529..1aef09f 100644
+--- a/backend/src/CertMaster.Infrastructure/Persistence/Configurations/EntityConfigurations.cs
++++ b/backend/src/CertMaster.Infrastructure/Persistence/Configurations/EntityConfigurations.cs
+@@ -1,143 +1,158 @@
+-using CertMaster.Domain.Entities;
+-using Microsoft.EntityFrameworkCore;
+-using Microsoft.EntityFrameworkCore.Metadata.Builders;
+-
+-namespace CertMaster.Infrastructure.Persistence.Configurations;
+-
+-public class UserConfiguration : IEntityTypeConfiguration<User>
+-{
+-    public void Configure(EntityTypeBuilder<User> builder)
+-    {
+-        builder.HasIndex(u => u.Email).IsUnique();
+-        builder.Property(u => u.Email).HasMaxLength(256).IsRequired();
+-        builder.Property(u => u.FullName).HasMaxLength(200).IsRequired();
+-    }
+-}
+-
+-public class CertificationConfiguration : IEntityTypeConfiguration<Certification>
+-{
+-    public void Configure(EntityTypeBuilder<Certification> builder)
+-    {
+-        builder.HasIndex(c => c.Code).IsUnique();
+-        builder.HasMany(c => c.Topics).WithOne(t => t.Certification!).HasForeignKey(t => t.CertificationId);
+-        builder.HasMany(c => c.Questions).WithOne(q => q.Certification!).HasForeignKey(q => q.CertificationId);
+-    }
+-}
+-
+-public class QuestionConfiguration : IEntityTypeConfiguration<Question>
+-{
+-    public void Configure(EntityTypeBuilder<Question> builder)
+-    {
+-        builder.HasIndex(q => new { q.CertificationId, q.Topic, q.Status });
+-        builder.HasMany(q => q.Options)
+-            .WithOne(o => o.Question!)
+-            .HasForeignKey(o => o.QuestionId)
+-            .OnDelete(DeleteBehavior.Cascade);
+-    }
+-}
+-
+-public class BookmarkConfiguration : IEntityTypeConfiguration<Bookmark>
+-{
+-    public void Configure(EntityTypeBuilder<Bookmark> builder)
+-    {
+-        // A learner can only bookmark a given question once.
+-        builder.HasIndex(b => new { b.UserId, b.QuestionId }).IsUnique();
+-
+-        builder.HasOne(b => b.Question)
+-            .WithMany()
+-            .HasForeignKey(b => b.QuestionId)
+-            .OnDelete(DeleteBehavior.Cascade);
+-
+-        builder.HasOne(b => b.User)
+-            .WithMany(u => u.Bookmarks)
+-            .HasForeignKey(b => b.UserId)
+-            .OnDelete(DeleteBehavior.Cascade);
+-    }
+-}
+-
+-public class QuestionReportConfiguration : IEntityTypeConfiguration<QuestionReport>
+-{
+-    public void Configure(EntityTypeBuilder<QuestionReport> builder)
+-    {
+-        builder.HasOne(r => r.Question)
+-            .WithMany()
+-            .HasForeignKey(r => r.QuestionId)
+-            .OnDelete(DeleteBehavior.Cascade);
+-    }
+-}
+-
+-public class ExamAttemptConfiguration : IEntityTypeConfiguration<ExamAttempt>
+-{
+-    public void Configure(EntityTypeBuilder<ExamAttempt> builder)
+-    {
+-        builder.HasIndex(a => new { a.UserId, a.StartedAtUtc });
+-        builder.HasIndex(a => a.UserId)
+-            .HasDatabaseName("IX_ExamAttempts_UserId_OneActiveMock")
+-            .IsUnique()
+-            .HasFilter("\"CompletedAtUtc\" IS NULL AND \"Mode\" = 1");
+-        builder.HasMany(a => a.Answers)
+-            .WithOne(x => x.ExamAttempt!)
+-            .HasForeignKey(x => x.ExamAttemptId)
+-            .OnDelete(DeleteBehavior.Cascade);
+-    }
+-}
+-
+-public class RefreshTokenConfiguration : IEntityTypeConfiguration<RefreshToken>
+-{
+-    public void Configure(EntityTypeBuilder<RefreshToken> builder)
+-    {
+-        builder.HasIndex(t => t.Token).IsUnique();
+-    }
+-}
+-
++using CertMaster.Domain.Entities;
++using Microsoft.EntityFrameworkCore;
++using Microsoft.EntityFrameworkCore.Metadata.Builders;
++
++namespace CertMaster.Infrastructure.Persistence.Configurations;
++
++public class UserConfiguration : IEntityTypeConfiguration<User>
++{
++    public void Configure(EntityTypeBuilder<User> builder)
++    {
++        builder.HasIndex(u => u.Email).IsUnique();
++        builder.Property(u => u.Email).HasMaxLength(256).IsRequired();
++        builder.Property(u => u.FullName).HasMaxLength(200).IsRequired();
++    }
++}
++
++public class CertificationConfiguration : IEntityTypeConfiguration<Certification>
++{
++    public void Configure(EntityTypeBuilder<Certification> builder)
++    {
++        builder.HasIndex(c => c.Code).IsUnique();
++        builder.HasMany(c => c.Topics).WithOne(t => t.Certification!).HasForeignKey(t => t.CertificationId);
++        builder.HasMany(c => c.Questions).WithOne(q => q.Certification!).HasForeignKey(q => q.CertificationId);
++    }
++}
++
++public class QuestionConfiguration : IEntityTypeConfiguration<Question>
++{
++    public void Configure(EntityTypeBuilder<Question> builder)
++    {
++        builder.HasIndex(q => new { q.CertificationId, q.Topic, q.Status });
++        builder.HasMany(q => q.Options)
++            .WithOne(o => o.Question!)
++            .HasForeignKey(o => o.QuestionId)
++            .OnDelete(DeleteBehavior.Cascade);
++    }
++}
++
++public class BookmarkConfiguration : IEntityTypeConfiguration<Bookmark>
++{
++    public void Configure(EntityTypeBuilder<Bookmark> builder)
++    {
++        // A learner can only bookmark a given question once.
++        builder.HasIndex(b => new { b.UserId, b.QuestionId }).IsUnique();
++
++        builder.HasOne(b => b.Question)
++            .WithMany()
++            .HasForeignKey(b => b.QuestionId)
++            .OnDelete(DeleteBehavior.Cascade);
++
++        builder.HasOne(b => b.User)
++            .WithMany(u => u.Bookmarks)
++            .HasForeignKey(b => b.UserId)
++            .OnDelete(DeleteBehavior.Cascade);
++    }
++}
++
++public class QuestionReportConfiguration : IEntityTypeConfiguration<QuestionReport>
++{
++    public void Configure(EntityTypeBuilder<QuestionReport> builder)
++    {
++        builder.HasOne(r => r.Question)
++            .WithMany()
++            .HasForeignKey(r => r.QuestionId)
++            .OnDelete(DeleteBehavior.Cascade);
++    }
++}
++
++public class ExamAttemptConfiguration : IEntityTypeConfiguration<ExamAttempt>
++{
++    public void Configure(EntityTypeBuilder<ExamAttempt> builder)
++    {
++        builder.HasIndex(a => new { a.UserId, a.StartedAtUtc });
++        builder.HasIndex(a => a.UserId)
++            .HasDatabaseName("IX_ExamAttempts_UserId_OneActiveMock")
++            .IsUnique()
++            .HasFilter("\"CompletedAtUtc\" IS NULL AND \"Mode\" = 1");
++        builder.HasMany(a => a.Answers)
++            .WithOne(x => x.ExamAttempt!)
++            .HasForeignKey(x => x.ExamAttemptId)
++            .OnDelete(DeleteBehavior.Cascade);
++    }
++}
++
++public class RefreshTokenConfiguration : IEntityTypeConfiguration<RefreshToken>
++{
++    public void Configure(EntityTypeBuilder<RefreshToken> builder)
++    {
++        builder.HasIndex(t => t.Token).IsUnique();
++    }
++}
++
+ public class ImportJobConfiguration : IEntityTypeConfiguration<ImportJob>
+-{
+-    public void Configure(EntityTypeBuilder<ImportJob> builder)
+-    {
+-        builder.HasIndex(j => new { j.CertificationId, j.Status });
+-        builder.HasIndex(j => j.QuestionBankVersionId);
+-
+-        builder.HasOne(j => j.QuestionBankVersion)
+-            .WithMany(v => v.ImportJobs)
+-            .HasForeignKey(j => j.QuestionBankVersionId)
+-            .OnDelete(DeleteBehavior.Cascade);
+-
+-        builder.HasMany(j => j.ExtractedImages)
+-            .WithOne(i => i.ImportJob!)
+-            .HasForeignKey(i => i.ImportJobId)
+-            .OnDelete(DeleteBehavior.Cascade);
+-
+-        builder.HasMany(j => j.ImportedQuestions)
+-            .WithOne(q => q.ImportJob!)
+-            .HasForeignKey(q => q.ImportJobId)
+-            .OnDelete(DeleteBehavior.Cascade);
+-    }
++{
++    public void Configure(EntityTypeBuilder<ImportJob> builder)
++    {
++        builder.HasIndex(j => new { j.CertificationId, j.Status });
++        builder.HasIndex(j => j.QuestionBankVersionId);
++
++        builder.HasOne(j => j.QuestionBankVersion)
++            .WithMany(v => v.ImportJobs)
++            .HasForeignKey(j => j.QuestionBankVersionId)
++            .OnDelete(DeleteBehavior.Cascade);
++
++        builder.HasMany(j => j.ExtractedImages)
++            .WithOne(i => i.ImportJob!)
++            .HasForeignKey(i => i.ImportJobId)
++            .OnDelete(DeleteBehavior.Cascade);
++
++        builder.HasMany(j => j.ImportedQuestions)
++            .WithOne(q => q.ImportJob!)
++            .HasForeignKey(q => q.ImportJobId)
++            .OnDelete(DeleteBehavior.Cascade);
++    }
+ }
+-
++
+ public class ImportedQuestionConfiguration : IEntityTypeConfiguration<ImportedQuestion>
+-{
+-    public void Configure(EntityTypeBuilder<ImportedQuestion> builder)
+-    {
+-        builder.HasIndex(q => new { q.QuestionBankVersionId, q.ReviewStatus });
+-
+-        builder.HasOne(q => q.QuestionBankVersion)
+-            .WithMany()
+-            .HasForeignKey(q => q.QuestionBankVersionId)
+-            .OnDelete(DeleteBehavior.Restrict);
+-
+-        builder.HasOne(q => q.Certification)
+-            .WithMany()
+-            .HasForeignKey(q => q.CertificationId)
+-            .OnDelete(DeleteBehavior.Restrict);
+-
++{
++    public void Configure(EntityTypeBuilder<ImportedQuestion> builder)
++    {
++        builder.HasIndex(q => new { q.QuestionBankVersionId, q.ReviewStatus });
++
++        builder.HasOne(q => q.QuestionBankVersion)
++            .WithMany()
++            .HasForeignKey(q => q.QuestionBankVersionId)
++            .OnDelete(DeleteBehavior.Restrict);
++
++        builder.HasOne(q => q.Certification)
++            .WithMany()
++            .HasForeignKey(q => q.CertificationId)
++            .OnDelete(DeleteBehavior.Restrict);
++
+         builder.HasMany(q => q.Options)
+-            .WithOne(o => o.ImportedQuestion!)
+-            .HasForeignKey(o => o.ImportedQuestionId)
++            .WithOne(o => o.ImportedQuestion!)
++            .HasForeignKey(o => o.ImportedQuestionId)
+             .OnDelete(DeleteBehavior.Cascade);
+ 
+         builder.HasMany(q => q.Images)
+             .WithOne(i => i.ImportedQuestion)
+             .HasForeignKey(i => i.ImportedQuestionId)
+             .OnDelete(DeleteBehavior.SetNull);
+-    }
+-}
++    }
++}
++
++public class AchievementCertificateConfiguration : IEntityTypeConfiguration<AchievementCertificate>
++{
++    public void Configure(EntityTypeBuilder<AchievementCertificate> builder)
++    {
++        builder.HasIndex(c => new { c.UserId, c.IssuedAtUtc });
++        builder.HasIndex(c => c.ExamAttemptId).IsUnique();
++        builder.HasIndex(c => c.VerificationCode).IsUnique();
++        builder.Property(c => c.VerificationCode).HasMaxLength(64).IsRequired();
++        builder.Property(c => c.Tier).HasMaxLength(32).IsRequired();
++        builder.HasOne(c => c.User).WithMany().HasForeignKey(c => c.UserId).OnDelete(DeleteBehavior.Cascade);
++        builder.HasOne(c => c.Certification).WithMany().HasForeignKey(c => c.CertificationId).OnDelete(DeleteBehavior.Restrict);
++        builder.HasOne(c => c.ExamAttempt).WithMany().HasForeignKey(c => c.ExamAttemptId).OnDelete(DeleteBehavior.Cascade);
++    }
++}
+diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
+index 0466a1d..4dc3d03 100644
+--- a/frontend/src/App.tsx
++++ b/frontend/src/App.tsx
+@@ -1,105 +1,109 @@
+-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+-import { AppLayout } from "./components/layout/AppLayout";
+-import { ProtectedRoute } from "./routes/ProtectedRoute";
+-
+-import Login from "./pages/auth/Login";
+-import Register from "./pages/auth/Register";
+-import ForgotPassword from "./pages/auth/ForgotPassword";
+-import ResetPassword from "./pages/auth/ResetPassword";
+-
+-import Dashboard from "./pages/learner/Dashboard";
+-import Practice from "./pages/learner/Practice";
+-import MockExam from "./pages/learner/MockExam";
+-import Results from "./pages/learner/Results";
+-import Progress from "./pages/learner/Progress";
+-import Bookmarks from "./pages/learner/Bookmarks";
+-import Flashcards from "./pages/learner/Flashcards";
+-import Certifications from "./pages/learner/Certifications";
+-import Leaderboard from "./pages/learner/Leaderboard";
+-import Premium from "./pages/learner/Premium";
+-import Settings from "./pages/learner/Settings";
+-import Help from "./pages/learner/Help";
+-import Notifications from "./pages/learner/Notifications";
+-
+-import AdminDashboard from "./pages/admin/AdminDashboard";
+-import AdminUsers from "./pages/admin/Users";
+-import QuestionBanks from "./pages/admin/QuestionBanks";
+-import ImportReview from "./pages/admin/ImportReview";
+-import AdminAnalytics from "./pages/admin/Analytics";
+-import AdminReports from "./pages/admin/Reports";
+-import Maintenance from "./pages/admin/Maintenance";
+-import Payments from "./pages/admin/Payments";
+-import Logs from "./pages/admin/Logs";
+-import UserDetails from "./pages/admin/UserDetails";
+-import AdminResults from "./pages/admin/Results";
+-import ResultDetails from "./pages/admin/ResultDetails";
+-import Questions from "./pages/admin/Questions";
+-import QuestionDetails from "./pages/admin/QuestionDetails";
+-import AdminCertifications from "./pages/admin/Certifications";
+-import AdminNotifications from "./pages/admin/Notifications";
+-
+-export default function App() {
+-  return (
+-    <BrowserRouter>
+-      <Routes>
+-        {/* Public auth routes */}
+-        <Route path="/login" element={<Login />} />
+-        <Route path="/register" element={<Register />} />
+-        <Route path="/forgot-password" element={<ForgotPassword />} />
+-        <Route path="/reset-password" element={<ResetPassword />} />
+-
+-        {/* Learner routes */}
+-        <Route
+-          element={
+-            <ProtectedRoute>
+-              <AppLayout />
+-            </ProtectedRoute>
+-          }
+-        >
+-          <Route path="/dashboard" element={<Dashboard />} />
+-          <Route path="/practice" element={<Practice />} />
+-          <Route path="/mock-exams" element={<MockExam />} />
+-          <Route path="/results" element={<Results />} />
+-          <Route path="/progress" element={<Progress />} />
+-          <Route path="/bookmarks" element={<Bookmarks />} />
+-          <Route path="/flashcards" element={<Flashcards />} />
+-          <Route path="/certifications" element={<Certifications />} />
+-          <Route path="/leaderboard" element={<Leaderboard />} />
+-          <Route path="/premium" element={<Premium />} />
+-          <Route path="/settings" element={<Settings />} />
+-          <Route path="/help" element={<Help />} />
+-          <Route path="/notifications" element={<Notifications />} />
+-        </Route>
+-
+-        {/* Administrator routes */}
+-        <Route
+-          element={
+-            <ProtectedRoute requiredRole="Administrator">
+-              <AppLayout />
+-            </ProtectedRoute>
+-          }
+-        >
+-          <Route path="/admin" element={<AdminDashboard />} />
+-          <Route path="/admin/users" element={<AdminUsers />} />
+-          <Route path="/admin/users/:id" element={<UserDetails />} />
+-          <Route path="/admin/question-banks" element={<QuestionBanks />} />
+-          <Route path="/admin/questions" element={<Questions />} />
+-          <Route path="/admin/questions/:id" element={<QuestionDetails />} />
+-          <Route path="/admin/certifications" element={<AdminCertifications />} />
+-          <Route path="/admin/imports/:jobId" element={<ImportReview />} />
+-          <Route path="/admin/analytics" element={<AdminAnalytics />} />
+-          <Route path="/admin/results" element={<AdminResults />} />
+-          <Route path="/admin/results/:id" element={<ResultDetails />} />
+-          <Route path="/admin/reports" element={<AdminReports />} />
+-          <Route path="/admin/maintenance" element={<Maintenance />} />
+-          <Route path="/admin/payments" element={<Payments />} />
+-          <Route path="/admin/logs" element={<Logs />} />
+-          <Route path="/admin/notifications" element={<AdminNotifications />} />
+-        </Route>
+-
+-        <Route path="/" element={<Navigate to="/dashboard" replace />} />
+-        <Route path="*" element={<Navigate to="/dashboard" replace />} />
+-      </Routes>
+-    </BrowserRouter>
+-  );
+-}
++import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
++import { AppLayout } from "./components/layout/AppLayout";
++import { ProtectedRoute } from "./routes/ProtectedRoute";
++
++import Login from "./pages/auth/Login";
++import Register from "./pages/auth/Register";
++import ForgotPassword from "./pages/auth/ForgotPassword";
++import ResetPassword from "./pages/auth/ResetPassword";
++
++import Dashboard from "./pages/learner/Dashboard";
++import Practice from "./pages/learner/Practice";
++import MockExam from "./pages/learner/MockExam";
++import Results from "./pages/learner/Results";
++import Progress from "./pages/learner/Progress";
++import Bookmarks from "./pages/learner/Bookmarks";
++import Flashcards from "./pages/learner/Flashcards";
++import Certifications from "./pages/learner/Certifications";
++import Leaderboard from "./pages/learner/Leaderboard";
++import Premium from "./pages/learner/Premium";
++import Settings from "./pages/learner/Settings";
++import Help from "./pages/learner/Help";
++import Notifications from "./pages/learner/Notifications";
++import AchievementCertificates from "./pages/learner/AchievementCertificates";
++import VerifyAchievementCertificate from "./pages/learner/VerifyAchievementCertificate";
++
++import AdminDashboard from "./pages/admin/AdminDashboard";
++import AdminUsers from "./pages/admin/Users";
++import QuestionBanks from "./pages/admin/QuestionBanks";
++import ImportReview from "./pages/admin/ImportReview";
++import AdminAnalytics from "./pages/admin/Analytics";
++import AdminReports from "./pages/admin/Reports";
++import Maintenance from "./pages/admin/Maintenance";
++import Payments from "./pages/admin/Payments";
++import Logs from "./pages/admin/Logs";
++import UserDetails from "./pages/admin/UserDetails";
++import AdminResults from "./pages/admin/Results";
++import ResultDetails from "./pages/admin/ResultDetails";
++import Questions from "./pages/admin/Questions";
++import QuestionDetails from "./pages/admin/QuestionDetails";
++import AdminCertifications from "./pages/admin/Certifications";
++import AdminNotifications from "./pages/admin/Notifications";
++
++export default function App() {
++  return (
++    <BrowserRouter>
++      <Routes>
++        {/* Public auth routes */}
++        <Route path="/login" element={<Login />} />
++        <Route path="/register" element={<Register />} />
++        <Route path="/forgot-password" element={<ForgotPassword />} />
++        <Route path="/reset-password" element={<ResetPassword />} />
++        <Route path="/verify-certificate/:code" element={<VerifyAchievementCertificate />} />
++
++        {/* Learner routes */}
++        <Route
++          element={
++            <ProtectedRoute>
++              <AppLayout />
++            </ProtectedRoute>
++          }
++        >
++          <Route path="/dashboard" element={<Dashboard />} />
++          <Route path="/practice" element={<Practice />} />
++          <Route path="/mock-exams" element={<MockExam />} />
++          <Route path="/results" element={<Results />} />
++          <Route path="/progress" element={<Progress />} />
++          <Route path="/bookmarks" element={<Bookmarks />} />
++          <Route path="/flashcards" element={<Flashcards />} />
++          <Route path="/certifications" element={<Certifications />} />
++          <Route path="/leaderboard" element={<Leaderboard />} />
++          <Route path="/premium" element={<Premium />} />
++          <Route path="/settings" element={<Settings />} />
++          <Route path="/help" element={<Help />} />
++          <Route path="/notifications" element={<Notifications />} />
++          <Route path="/my-certificates" element={<AchievementCertificates />} />
++        </Route>
++
++        {/* Administrator routes */}
++        <Route
++          element={
++            <ProtectedRoute requiredRole="Administrator">
++              <AppLayout />
++            </ProtectedRoute>
++          }
++        >
++          <Route path="/admin" element={<AdminDashboard />} />
++          <Route path="/admin/users" element={<AdminUsers />} />
++          <Route path="/admin/users/:id" element={<UserDetails />} />
++          <Route path="/admin/question-banks" element={<QuestionBanks />} />
++          <Route path="/admin/questions" element={<Questions />} />
++          <Route path="/admin/questions/:id" element={<QuestionDetails />} />
++          <Route path="/admin/certifications" element={<AdminCertifications />} />
++          <Route path="/admin/imports/:jobId" element={<ImportReview />} />
++          <Route path="/admin/analytics" element={<AdminAnalytics />} />
++          <Route path="/admin/results" element={<AdminResults />} />
++          <Route path="/admin/results/:id" element={<ResultDetails />} />
++          <Route path="/admin/reports" element={<AdminReports />} />
++          <Route path="/admin/maintenance" element={<Maintenance />} />
++          <Route path="/admin/payments" element={<Payments />} />
++          <Route path="/admin/logs" element={<Logs />} />
++          <Route path="/admin/notifications" element={<AdminNotifications />} />
++        </Route>
++
++        <Route path="/" element={<Navigate to="/dashboard" replace />} />
++        <Route path="*" element={<Navigate to="/dashboard" replace />} />
++      </Routes>
++    </BrowserRouter>
++  );
++}
+diff --git a/frontend/src/components/layout/Sidebar.tsx b/frontend/src/components/layout/Sidebar.tsx
+index dc52be5..65fc1c6 100644
+--- a/frontend/src/components/layout/Sidebar.tsx
++++ b/frontend/src/components/layout/Sidebar.tsx
+@@ -1,119 +1,120 @@
+-import { NavLink } from "react-router-dom";
+-import {
+-  LayoutDashboard,
+-  Dumbbell,
+-  FileClock,
+-  BarChart3,
+-  TrendingUp,
+-  Bookmark,
+-  Award,
+-  Trophy,
+-  Crown,
+-  Layers,
+-  Settings,
+-  Bell,
+-  HelpCircle,
+-  ChevronsLeft,
+-  ChevronsRight,
+-  Users,
+-  Database,
+-  Wrench,
+-  CreditCard,
+-  ScrollText,
+-  Flag,
+-  FileQuestion,
+-} from "lucide-react";
+-import { useAuth } from "../../context/AuthContext";
+-
+-const learnerNav = [
+-  { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
+-  { to: "/practice", label: "Practice", icon: Dumbbell },
+-  { to: "/mock-exams", label: "Mock Exams", icon: FileClock },
+-  { to: "/results", label: "My Results", icon: BarChart3 },
+-  { to: "/progress", label: "Progress", icon: TrendingUp },
+-  { to: "/bookmarks", label: "Bookmarks", icon: Bookmark },
+-  { to: "/flashcards", label: "Flashcards", icon: Layers },
+-  { to: "/certifications", label: "Certifications", icon: Award },
+-  { to: "/leaderboard", label: "Leaderboard", icon: Trophy },
+-  { to: "/premium", label: "Premium", icon: Crown },
+-  { to: "/notifications", label: "Notifications", icon: Bell },
+-];
+-
+-const learnerFooterNav = [
+-  { to: "/settings", label: "Settings", icon: Settings },
+-  { to: "/help", label: "Help", icon: HelpCircle },
+-];
+-
+-const adminNav = [
+-  { to: "/admin", label: "Overview", icon: LayoutDashboard },
+-  { to: "/admin/users", label: "Users", icon: Users },
+-  { to: "/admin/question-banks", label: "Question Banks", icon: Database },
+-  { to: "/admin/questions", label: "Questions", icon: FileQuestion },
+-  { to: "/admin/certifications", label: "Certifications", icon: Award },
+-  { to: "/admin/reports", label: "Reported Questions", icon: Flag },
+-  { to: "/admin/analytics", label: "Analytics", icon: BarChart3 },
+-  { to: "/admin/results", label: "Learner Results", icon: TrendingUp },
+-  { to: "/admin/maintenance", label: "Maintenance", icon: Wrench },
+-  { to: "/admin/payments", label: "Payments", icon: CreditCard },
+-  { to: "/admin/logs", label: "Logs", icon: ScrollText },
+-  { to: "/admin/notifications", label: "Notifications", icon: Bell },
+-];
+-
+-export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
+-  const { user } = useAuth();
+-  const isAdmin = user?.role === "Administrator";
+-  const navItems = isAdmin ? adminNav : learnerNav;
+-
+-  return (
+-    <aside
+-      className={`hidden lg:flex flex-col fixed top-[70px] left-0 bottom-0 bg-brand-primary text-white transition-all duration-200 ${collapsed ? "w-[76px]" : "w-64"}`}
+-    >
+-      <nav className="flex-1 overflow-y-auto no-scrollbar py-4 px-2 space-y-1">
+-        {navItems.map((item) => (
+-          <NavLink
+-            key={item.to}
+-            to={item.to}
+-            end={item.to === "/admin"}
+-            className={({ isActive }) =>
+-              `flex items-center gap-3 h-11 px-3 rounded-md text-sm font-medium transition-colors ${
+-                isActive ? "bg-white/15 text-white" : "text-white/80 hover:bg-white/10 hover:text-white"
+-              }`
+-            }
+-            title={collapsed ? item.label : undefined}
+-          >
+-            <item.icon size={20} className="shrink-0" />
+-            {!collapsed && <span>{item.label}</span>}
+-          </NavLink>
+-        ))}
+-      </nav>
+-
+-      {!isAdmin && (
+-        <div className="px-2 py-2 space-y-1 border-t border-white/10">
+-          {learnerFooterNav.map((item) => (
+-            <NavLink
+-              key={item.to}
+-              to={item.to}
+-              className={({ isActive }) =>
+-                `flex items-center gap-3 h-11 px-3 rounded-md text-sm font-medium transition-colors ${
+-                  isActive ? "bg-white/15 text-white" : "text-white/80 hover:bg-white/10 hover:text-white"
+-                }`
+-              }
+-              title={collapsed ? item.label : undefined}
+-            >
+-              <item.icon size={20} className="shrink-0" />
+-              {!collapsed && <span>{item.label}</span>}
+-            </NavLink>
+-          ))}
+-        </div>
+-      )}
+-
+-      <button
+-        onClick={onToggle}
+-        className="h-12 flex items-center justify-center text-white/70 hover:text-white hover:bg-white/10 border-t border-white/10"
+-        aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+-      >
+-        {collapsed ? <ChevronsRight size={20} /> : <ChevronsLeft size={20} />}
+-      </button>
+-    </aside>
+-  );
+-}
++import { NavLink } from "react-router-dom";
++import {
++  LayoutDashboard,
++  Dumbbell,
++  FileClock,
++  BarChart3,
++  TrendingUp,
++  Bookmark,
++  Award,
++  Trophy,
++  Crown,
++  Layers,
++  Settings,
++  Bell,
++  HelpCircle,
++  ChevronsLeft,
++  ChevronsRight,
++  Users,
++  Database,
++  Wrench,
++  CreditCard,
++  ScrollText,
++  Flag,
++  FileQuestion,
++} from "lucide-react";
++import { useAuth } from "../../context/AuthContext";
++
++const learnerNav = [
++  { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
++  { to: "/practice", label: "Practice", icon: Dumbbell },
++  { to: "/mock-exams", label: "Mock Exams", icon: FileClock },
++  { to: "/results", label: "My Results", icon: BarChart3 },
++  { to: "/progress", label: "Progress", icon: TrendingUp },
++  { to: "/bookmarks", label: "Bookmarks", icon: Bookmark },
++  { to: "/flashcards", label: "Flashcards", icon: Layers },
++  { to: "/certifications", label: "Certifications", icon: Award },
++  { to: "/my-certificates", label: "My Certificates", icon: Award },
++  { to: "/leaderboard", label: "Leaderboard", icon: Trophy },
++  { to: "/premium", label: "Premium", icon: Crown },
++  { to: "/notifications", label: "Notifications", icon: Bell },
++];
++
++const learnerFooterNav = [
++  { to: "/settings", label: "Settings", icon: Settings },
++  { to: "/help", label: "Help", icon: HelpCircle },
++];
++
++const adminNav = [
++  { to: "/admin", label: "Overview", icon: LayoutDashboard },
++  { to: "/admin/users", label: "Users", icon: Users },
++  { to: "/admin/question-banks", label: "Question Banks", icon: Database },
++  { to: "/admin/questions", label: "Questions", icon: FileQuestion },
++  { to: "/admin/certifications", label: "Certifications", icon: Award },
++  { to: "/admin/reports", label: "Reported Questions", icon: Flag },
++  { to: "/admin/analytics", label: "Analytics", icon: BarChart3 },
++  { to: "/admin/results", label: "Learner Results", icon: TrendingUp },
++  { to: "/admin/maintenance", label: "Maintenance", icon: Wrench },
++  { to: "/admin/payments", label: "Payments", icon: CreditCard },
++  { to: "/admin/logs", label: "Logs", icon: ScrollText },
++  { to: "/admin/notifications", label: "Notifications", icon: Bell },
++];
++
++export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
++  const { user } = useAuth();
++  const isAdmin = user?.role === "Administrator";
++  const navItems = isAdmin ? adminNav : learnerNav;
++
++  return (
++    <aside
++      className={`hidden lg:flex flex-col fixed top-[70px] left-0 bottom-0 bg-brand-primary text-white transition-all duration-200 ${collapsed ? "w-[76px]" : "w-64"}`}
++    >
++      <nav className="flex-1 overflow-y-auto no-scrollbar py-4 px-2 space-y-1">
++        {navItems.map((item) => (
++          <NavLink
++            key={item.to}
++            to={item.to}
++            end={item.to === "/admin"}
++            className={({ isActive }) =>
++              `flex items-center gap-3 h-11 px-3 rounded-md text-sm font-medium transition-colors ${
++                isActive ? "bg-white/15 text-white" : "text-white/80 hover:bg-white/10 hover:text-white"
++              }`
++            }
++            title={collapsed ? item.label : undefined}
++          >
++            <item.icon size={20} className="shrink-0" />
++            {!collapsed && <span>{item.label}</span>}
++          </NavLink>
++        ))}
++      </nav>
++
++      {!isAdmin && (
++        <div className="px-2 py-2 space-y-1 border-t border-white/10">
++          {learnerFooterNav.map((item) => (
++            <NavLink
++              key={item.to}
++              to={item.to}
++              className={({ isActive }) =>
++                `flex items-center gap-3 h-11 px-3 rounded-md text-sm font-medium transition-colors ${
++                  isActive ? "bg-white/15 text-white" : "text-white/80 hover:bg-white/10 hover:text-white"
++                }`
++              }
++              title={collapsed ? item.label : undefined}
++            >
++              <item.icon size={20} className="shrink-0" />
++              {!collapsed && <span>{item.label}</span>}
++            </NavLink>
++          ))}
++        </div>
++      )}
++
++      <button
++        onClick={onToggle}
++        className="h-12 flex items-center justify-center text-white/70 hover:text-white hover:bg-white/10 border-t border-white/10"
++        aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
++      >
++        {collapsed ? <ChevronsRight size={20} /> : <ChevronsLeft size={20} />}
++      </button>
++    </aside>
++  );
++}
+diff --git a/frontend/src/pages/learner/AchievementCertificates.tsx b/frontend/src/pages/learner/AchievementCertificates.tsx
+new file mode 100644
+index 0000000..ab9b3fb
+--- /dev/null
++++ b/frontend/src/pages/learner/AchievementCertificates.tsx
+@@ -0,0 +1,19 @@
++import { useEffect, useState } from "react";
++import { Award, ExternalLink, LoaderCircle } from "lucide-react";
++import { api } from "../../lib/api";
++
++type Certificate = { id: string; certificationId: string; certificationName: string; examAttemptId: string; scorePercent: number; tier: string; verificationCode: string; issuedAtUtc: string };
++
++export default function AchievementCertificates() {
++  const [items, setItems] = useState<Certificate[]>([]);
++  const [loading, setLoading] = useState(true);
++  const [error, setError] = useState("");
++  useEffect(() => {
++    api.get<Certificate[]>("/achievement-certificates/mine").then(r => setItems(r.data)).catch(() => setError("We couldn't load your certificates. Please try again.")).finally(() => setLoading(false));
++  }, []);
++  const verifyUrl = (code: string) => `${window.location.origin}/verify-certificate/${encodeURIComponent(code)}`;
++  return <section className="mx-auto max-w-5xl space-y-6 p-4 md:p-8">
++    <div><h1 className="text-2xl font-bold text-slate-900">My Achievement Certificates</h1><p className="mt-1 text-sm text-slate-600">CertMaster recognition for mock-exam achievements. These are not official vendor certifications.</p></div>
++    {loading ? <div className="flex items-center gap-2 py-10 text-slate-600"><LoaderCircle className="animate-spin" size={18}/> Loading certificates…</div> : error ? <p role="alert" className="rounded-lg bg-red-50 p-4 text-red-700">{error}</p> : items.length === 0 ? <div className="rounded-xl border border-dashed p-10 text-center"><Award className="mx-auto mb-3 text-slate-400" size={36}/><h2 className="font-semibold">No certificates yet</h2><p className="mt-2 text-sm text-slate-600">Complete a mock exam and score at least 75% to earn your first certificate.</p></div> : <div className="grid gap-4 md:grid-cols-2">{items.map(c => <article key={c.id} className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm"><div className="flex items-start justify-between gap-3"><div className="rounded-lg bg-amber-50 p-3 text-amber-700"><Award size={24}/></div><span className="rounded-full bg-emerald-50 px-3 py-1 text-sm font-semibold text-emerald-800">{c.tier}</span></div><h2 className="mt-4 text-lg font-bold">{c.certificationName}</h2><p className="mt-1 text-sm text-slate-600">CertMaster Achievement Certificate</p><div className="mt-4 flex items-baseline gap-2"><strong className="text-3xl">{c.scorePercent}%</strong><span className="text-sm text-slate-500">mock-exam score</span></div><p className="mt-3 text-xs text-slate-500">Issued {new Date(c.issuedAtUtc).toLocaleDateString()}</p><p className="mt-1 break-all font-mono text-xs text-slate-500">Verification: {c.verificationCode}</p><button onClick={() => window.open(verifyUrl(c.verificationCode), "_blank", "noopener,noreferrer")} className="mt-4 inline-flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white">Verify certificate <ExternalLink size={15}/></button></article>)}</div>}
++  </section>;
++}
+diff --git a/frontend/src/pages/learner/VerifyAchievementCertificate.tsx b/frontend/src/pages/learner/VerifyAchievementCertificate.tsx
+new file mode 100644
+index 0000000..86bcdf7
+--- /dev/null
++++ b/frontend/src/pages/learner/VerifyAchievementCertificate.tsx
+@@ -0,0 +1,10 @@
++import { useEffect, useState } from "react";
++import { useParams } from "react-router-dom";
++import { api } from "../../lib/api";
++
++type Verified = { certificateType: string; verificationCode: string; learnerName: string; certificationName: string; scorePercent: number; tier: string; issuedAtUtc: string; issuer: string };
++export default function VerifyAchievementCertificate() {
++ const { code = "" } = useParams(); const [item,setItem] = useState<Verified|null>(null); const [loading,setLoading] = useState(true);
++ useEffect(()=>{ api.get<Verified>(`/achievement-certificates/verify/${encodeURIComponent(code)}`).then(r=>setItem(r.data)).catch(()=>setItem(null)).finally(()=>setLoading(false)); },[code]);
++ return <main className="mx-auto max-w-2xl p-6 md:p-12"><div className="rounded-2xl border bg-white p-8 shadow-sm"><p className="text-sm font-semibold uppercase tracking-wide text-slate-500">CertMaster verification</p><h1 className="mt-2 text-2xl font-bold">Achievement Certificate</h1>{loading ? <p className="mt-6">Checking verification code…</p> : item ? <><p className="mt-5 rounded-lg bg-emerald-50 p-3 font-semibold text-emerald-800">Valid CertMaster achievement record</p><dl className="mt-6 space-y-4 text-sm">{[["Learner",item.learnerName],["Achievement",item.tier],["Certification track",item.certificationName],["Mock-exam score",`${item.scorePercent}%`],["Issued",new Date(item.issuedAtUtc).toLocaleDateString()],["Verification code",item.verificationCode],["Issuer",item.issuer]].map(([k,v])=><div key={k}><dt className="text-slate-500">{k}</dt><dd className="font-semibold">{v}</dd></div>)}</dl><p className="mt-6 text-xs text-slate-500">This confirms a CertMaster practice-platform achievement. It is not an official vendor certification.</p></> : <p role="alert" className="mt-6 rounded-lg bg-red-50 p-4 text-red-700">This certificate could not be verified. The code may be invalid.</p>}</div></main>;
++}

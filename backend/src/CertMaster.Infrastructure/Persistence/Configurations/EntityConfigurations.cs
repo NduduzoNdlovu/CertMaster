@@ -141,3 +141,18 @@ public class ImportedQuestionConfiguration : IEntityTypeConfiguration<ImportedQu
             .OnDelete(DeleteBehavior.SetNull);
     }
 }
+
+public class AchievementCertificateConfiguration : IEntityTypeConfiguration<AchievementCertificate>
+{
+    public void Configure(EntityTypeBuilder<AchievementCertificate> builder)
+    {
+        builder.HasIndex(c => new { c.UserId, c.IssuedAtUtc });
+        builder.HasIndex(c => c.ExamAttemptId).IsUnique();
+        builder.HasIndex(c => c.VerificationCode).IsUnique();
+        builder.Property(c => c.VerificationCode).HasMaxLength(64).IsRequired();
+        builder.Property(c => c.Tier).HasMaxLength(32).IsRequired();
+        builder.HasOne(c => c.User).WithMany().HasForeignKey(c => c.UserId).OnDelete(DeleteBehavior.Cascade);
+        builder.HasOne(c => c.Certification).WithMany().HasForeignKey(c => c.CertificationId).OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne(c => c.ExamAttempt).WithMany().HasForeignKey(c => c.ExamAttemptId).OnDelete(DeleteBehavior.Cascade);
+    }
+}
